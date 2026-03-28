@@ -1,0 +1,336 @@
+import sys
+import os
+import json
+import time
+import numpy as np
+from PyQt5 import QtCore, QtGui, QtWidgets
+import pyqtgraph.opengl as gl
+from core.frame_model import UnifiedExporter, MocapFrame, Joint
+from core.skeleton import SkeletonHierarchy
+from core.logger import engine_logger
+
+class MeshUtils:
+    @staticmethod
+    def get_bone_matrix(p1, p2, thickness=0.015):
+        """
+        Calculates the transformation matrix for a cylinder bone between p1 and p2.
+        """
+        v = p2 - p1
+        length = np.linalg.norm(v)
+        if length < 1e-6: return None
+        
+        # Unit vector
+        v_unit = v / length
+        
+        # Rotation to align Z-axis (default cylinder direction) with v_unit
+        z_axis = np.array([0, 0, 1])
+        if np.allclose(v_unit, z_axis):
+            angle = 0
+            axis = np.array([1, 0, 0])
+        elif np.allclose(v_unit, -z_axis):
+            angle = 180
+            axis = np.array([1, 0, 0])
+        else:
+            cos_theta = np.dot(z_axis, v_unit)
+            axis = np.cross(z_axis, v_unit)
+            angle = np.arccos(np.clip(cos_theta, -1.0, 1.0))
+        
+        # Build transform
+        tr = QtGui.QMatrix4x4()
+        tr.translate(p1[0], p1[1], p1[2])
+        tr.rotate(np.degrees(angle), axis[0], axis[1], axis[2])
+        tr.scale(thickness, thickness, length)
+        return tr
+
+class MocapViewerAAA(QtWidgets.QMainWindow):
+    def __init__(self, filepath=None):
+        super().__init__()
+        self.setWindowTitle("MotionForge Engine - Cinematic Viewport 1.5")
+        self.resize(1280, 800)
+        
+        # Engine Data
+        self.frames = []
+        self.current_time = 0.0
+        self.is_playing = True
+        self.playback_speed = 1.0
+        self.loop = True
+        
+        self.setup_ui()
+        self.setup_viewport()
+        
+        # Mesh Cache (Avoid re-creating items)
+        self.joint_meshes = {} # name -> GLMeshItem
+        self.bone_meshes = {}  # (start, end) -> GLMeshItem
+        self.shadow_mesh = None
+        
+        # Timer for 60FPS loop
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.engine_tick)
+        self.last_tick = time.time()
+        self.timer.start(16) # ~60 FPS
+        
+        if filepath:
+            self.load_file(filepath)
+
+    def setup_ui(self):
+        self.central = QtWidgets.QWidget()
+        self.setCentralWidget(self.central)
+        self.layout = QtWidgets.QVBoxLayout(self.central)
+        self.layout.setContentsMargins(0,0,0,0)
+        
+        # Viewport Container
+        self.viewport_container = QtWidgets.QFrame()
+        self.v_layout = QtWidgets.QVBoxLayout(self.viewport_container)
+        self.v_layout.setContentsMargins(0,0,0,0)
+        self.layout.addWidget(self.viewport_container, 8)
+        
+        # Standard ViewWidget (Will be initialized in setup_viewport)
+        
+        # Overlay UI (Translucent)
+        self.overlay = QtWidgets.QWidget(self.viewport_container)
+        self.overlay.setAttribute(QtCore.Qt.WA_NoSystemBackground)
+        self.overlay.setStyleSheet("color: #00ffcc; font-family: 'Segoe UI'; font-size: 10pt;")
+        self.overlay.setFixedWidth(250)
+        self.overlay.move(20, 20)
+        
+        o_layout = QtWidgets.QVBoxLayout(self.overlay)
+        self.lbl_status = QtWidgets.QLabel("● NEXUS ENGINE ACTIVE")
+        self.lbl_frame = QtWidgets.QLabel("FRAME: 0 / 0")
+        self.lbl_fps = QtWidgets.QLabel("PLAYBACK: 60 FPS")
+        o_layout.addWidget(self.lbl_status)
+        o_layout.addWidget(self.lbl_frame)
+        o_layout.addWidget(self.lbl_fps)
+        
+        # Control Panel (Bottom)
+        self.controls = QtWidgets.QWidget()
+        self.controls.setFixedHeight(100)
+        self.controls.setStyleSheet("background: #0a0a0a; border-top: 1px solid #222;")
+        c_layout = QtWidgets.QVBoxLayout(self.controls)
+        
+        # Timeline
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider.setStyleSheet("QSlider::groove:horizontal { height: 4px; background: #333; } "
+                                 "QSlider::handle:horizontal { background: #00ffcc; width: 14px; margin: -5px 0; }")
+        c_layout.addWidget(self.slider)
+        
+        # Buttons
+        b_layout = QtWidgets.QHBoxLayout()
+        self.btn_play = QtWidgets.QPushButton("PLAY")
+        self.btn_play.clicked.connect(self.toggle_play)
+        b_layout.addWidget(self.btn_play)
+        
+        self.speed_combo = QtWidgets.QComboBox()
+        self.speed_combo.addItems(["0.5x", "1.0x", "2.0x"])
+        self.speed_combo.setCurrentIndex(1)
+        self.speed_combo.currentIndexChanged.connect(self.update_speed)
+        b_layout.addWidget(self.speed_combo)
+        
+        self.btn_debug = QtWidgets.QPushButton("DEBUG: OFF")
+        self.btn_debug.setCheckable(True)
+        self.btn_debug.clicked.connect(self.toggle_debug)
+        b_layout.addWidget(self.btn_debug)
+        
+        c_layout.addLayout(b_layout)
+        self.layout.addWidget(self.controls)
+        
+        self.hierarchy = SkeletonHierarchy()
+        self.debug_mode = False
+
+    def setup_viewport(self):
+        self.view = gl.GLViewWidget()
+        self.view.setBackgroundColor('#050505')
+        self.view.setCameraPosition(distance=4, elevation=15, azimuth=-90)
+        self.v_layout.addWidget(self.view)
+        
+        # Infinite Grid (AAA Style)
+        grid = gl.GLGridItem()
+        grid.setSize(20, 20)
+        grid.setSpacing(1, 1)
+        # grid.translate(0, 0, 0) # Ground at Y=0
+        self.view.addItem(grid)
+        
+        # Origin Axis
+        axis = gl.GLAxisItem()
+        axis.setSize(1, 1, 1)
+        self.view.addItem(axis)
+        
+        # Shared Meshes
+        self.sphere_data = gl.MeshData.sphere(rows=10, cols=10)
+        self.cylinder_data = gl.MeshData.cylinder(rows=10, cols=10)
+
+    def load_file(self, path):
+        try:
+            self.frames = UnifiedExporter.load_recording(path)
+            if not self.frames: return
+            self.slider.setMaximum(len(self.frames) - 1)
+            self.total_duration = self.frames[-1].timestamp
+            engine_logger.info(f"AAA Viewer: Loaded {len(self.frames)} frames")
+        except Exception as e:
+            engine_logger.error(f"Viewer Error: {e}")
+
+    def toggle_play(self):
+        self.is_playing = not self.is_playing
+        self.btn_play.setText("PAUSE" if self.is_playing else "PLAY")
+
+    def toggle_debug(self):
+        self.debug_mode = not self.debug_mode
+        self.btn_debug.setText("DEBUG: ON" if self.debug_mode else "DEBUG: OFF")
+
+    def update_speed(self):
+        speed_str = self.speed_combo.currentText().replace("x", "")
+        self.playback_speed = float(speed_str)
+
+    def engine_tick(self):
+        now = time.time()
+        dt = (now - self.last_tick) * self.playback_speed
+        self.last_tick = now
+        
+        if self.is_playing and self.frames:
+            self.current_time += dt
+            if self.current_time > self.total_duration:
+                if self.loop: self.current_time = 0.0
+                else: self.is_playing = False
+            
+            # 1. Update Slider
+            if self.total_duration > 0:
+                progress = (self.current_time / self.total_duration) * (len(self.frames)-1)
+                self.slider.blockSignals(True)
+                self.slider.setValue(int(progress))
+                self.slider.blockSignals(False)
+                
+                # 2. Render Interpolated Frame
+                self.render_interpolated(self.current_time)
+            else:
+                self.draw_meshes(self.frames[0].get_world_coords())
+
+    def render_interpolated(self, t):
+        # Find frames for LERP
+        idx = 0
+        for i in range(len(self.frames)-1):
+            if self.frames[i].timestamp <= t <= self.frames[i+1].timestamp:
+                idx = i
+                break
+        
+        f1 = self.frames[idx]
+        f2 = self.frames[idx+1]
+        
+        # Alpha
+        total_dt = f2.timestamp - f1.timestamp
+        if total_dt > 0:
+            alpha = (t - f1.timestamp) / total_dt
+        else:
+            alpha = 0.0
+            
+        # Standard Axis Mapping in data processing
+        p1 = f1.get_world_coords()
+        p2 = f2.get_world_coords()
+        
+        # Interpolated points
+        points = {}
+        for name in p1:
+            if name in p2:
+                points[name] = p1[name] * (1-alpha) + p2[name] * alpha
+        
+        # --- BONE HIERARCHY ENFORCEMENT ---
+        # 1. First Pass: Apply absolute axis mapping (ALREADY DONE in get_world_coords)
+        # 2. Second Pass: Enforce Skeleton Hierarchy
+        if not self.debug_mode:
+            points = self.hierarchy.enforce_lengths(points)
+        
+        # --- GROUND ALIGNMENT FIX ---
+        # Find lowest part (usually ankles or heels)
+        ground_needed = ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL", "LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX"]
+        y_min = 100
+        for name in ground_needed:
+            if name in points:
+                # In PyQtGraph: X=horiz, Y=depth, Z=up
+                if points[name][2] < y_min: y_min = points[name][2]
+        
+        # Apply ground offset (Lowest Point = 0)
+        offset = -y_min
+        for name in points:
+            points[name][2] += offset
+        
+        self.draw_meshes(points)
+        self.lbl_frame.setText(f"FRAME: {idx} / {len(self.frames)}")
+
+    def draw_meshes(self, points):
+        import mediapipe as mp
+        connections = mp.solutions.holistic.POSE_CONNECTIONS
+        
+        # Color Palettes
+        colors = {
+            "Spine": (0, 1, 1, 0.8),    # Cyan
+            "Arms": (1, 0, 1, 0.8),     # Magenta
+            "Legs": (1, 1, 0, 0.8),     # Yellow
+            "Head": (1, 0.5, 0, 0.9),   # Orange
+            "Hands": (1, 1, 1, 0.7)     # White
+        }
+
+        # 1. Update Joints
+        for name, pos in points.items():
+            if name not in self.joint_meshes:
+                # Size by importance
+                size = 0.02
+                color = colors["Hands"]
+                if "SHOULDER" in name or "HIP" in name: size = 0.035; color = colors["Spine"]
+                if "EYE" in name or "NOSE" in name or "EAR" in name: size = 0.015; color = colors["Head"]
+                
+                mesh = gl.GLMeshItem(meshdata=self.sphere_data, color=color, shader='shaded', smooth=True)
+                self.view.addItem(mesh)
+                self.joint_meshes[name] = mesh
+            
+            tr = QtGui.QMatrix4x4()
+            tr.translate(pos[0], pos[1], pos[2])
+            self.joint_meshes[name].setTransform(tr)
+
+        # 2. Update Bones
+        for conn in connections:
+            start_name = mp.solutions.holistic.PoseLandmark(conn[0]).name
+            end_name = mp.solutions.holistic.PoseLandmark(conn[1]).name
+            
+            if start_name in points and end_name in points:
+                bone_id = (start_name, end_name)
+                p1, p2 = points[start_name], points[end_name]
+                
+                if bone_id not in self.bone_meshes:
+                    # Color check
+                    color = colors["Arms"]
+                    if "HIP" in start_name or "SHOULDER" in start_name: color = colors["Spine"]
+                    if "KNEE" in start_name or "ANKLE" in start_name: color = colors["Legs"]
+                    if "EYE" in start_name or "NOSE" in start_name: color = colors["Head"]
+                    
+                    # Bone thickness
+                    thickness = 0.012
+                    if "HIP" in start_name and "HIP" in end_name: thickness = 0.03
+                    if "SHOULDER" in start_name and "SHOULDER" in end_name: thickness = 0.025
+                    
+                    mesh = gl.GLMeshItem(meshdata=self.cylinder_data, color=color, shader='shaded', smooth=True)
+                    self.view.addItem(mesh)
+                    self.bone_meshes[bone_id] = {"item": mesh, "thick": thickness}
+                
+                # Update Transform
+                tr = MeshUtils.get_bone_matrix(p1, p2, thickness=self.bone_meshes[bone_id]["thick"])
+                if tr:
+                    self.bone_meshes[bone_id]["item"].setTransform(tr)
+
+        # 3. Update Shadow
+        root_pos = points.get("LEFT_HIP", np.array([0,0,0]))
+        if not self.shadow_mesh:
+            self.shadow_mesh = gl.GLMeshItem(meshdata=self.sphere_data, color=(0,0,0,0.4), shader='shaded', smooth=True)
+            self.view.addItem(self.shadow_mesh)
+        
+        strans = QtGui.QMatrix4x4()
+        strans.translate(root_pos[0], root_pos[1], 0) # Ground shadow
+        strans.scale(0.3, 0.3, 0.001) # Flatten sphere to disc
+        self.shadow_mesh.setTransform(strans)
+
+def main():
+    app = QtWidgets.QApplication(sys.argv)
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    viewer = MocapViewerAAA(path)
+    viewer.show()
+    sys.exit(app.exec_())
+
+if __name__ == "__main__":
+    main()
