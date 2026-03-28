@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime
 from typing import List, Dict, Any
 from core.frame_model import UnifiedExporter, MocapFrame, Joint
+from core.bvh_exporter import BVHExporter
 from core.logger import engine_logger
 
 class BlenderExporter:
@@ -90,13 +91,24 @@ class BlenderExporter:
         engine_logger.info(f"Exporting to Blender format: {output_path}")
         blender_data = self.normalize_and_validate()
         
+        # 🟢 NEW: Industry Standard BVH Export
+        bvh_path = output_path.replace(".json", ".bvh")
+        engine_logger.info(f"Generating Industry Standard BVH: {bvh_path}")
+        try:
+            bvh_exp = BVHExporter(self.frames)
+            bvh_exp.export(bvh_path)
+            self.report["bvh_status"] = "Success"
+        except Exception as e:
+            engine_logger.error(f"BVH Export Error: {e}")
+            self.report["bvh_status"] = f"Failed: {e}"
+
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump({"frames": blender_data}, f, indent=4)
             
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(self.report, f, indent=4)
             
-        return output_path, report_path
+        return output_path, report_path, bvh_path
 
 def main():
     if len(sys.argv) < 2:

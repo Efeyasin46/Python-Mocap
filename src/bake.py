@@ -11,7 +11,7 @@ from datetime import datetime
 from core.logger import engine_logger
 from core.frame_model import MocapFrame, Joint, UnifiedExporter
 from core.motion_pipeline import MotionPipeline
-from core.constraints import SmoothingFilter, MotionStabilizer
+from core.constraints import SmoothingFilter, MotionStabilizer, BilateralDepthStabilizer
 from core.skeleton import SkeletonHierarchy
 
 # Global MediaPipe References
@@ -90,6 +90,10 @@ def main():
             print(f"\r[ENGINE BAKE] Progress: %{progress:.1f} | Frame: {frame_idx}/{total_frames} ", end="")
 
     cap.release()
+    
+    # --- POST-PROCESSING ENHANCEMENTS ---
+    engine_logger.info("Applying Elite Bilateral Foot Stabilization...")
+    baked_frames = BilateralDepthStabilizer.process_sequence(baked_frames)
     
     # Unified Exporter ile Kaydet
     output_filename = f"data/motion_baked_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"

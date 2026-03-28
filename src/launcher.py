@@ -106,11 +106,13 @@ class MotionForgeDashboard(QtWidgets.QMainWindow):
         self.btn_bake = self.create_btn("🤖 OFFLINE BAKE", self.select_and_bake, "secondary")
         self.btn_view = self.create_btn("🦴 3D VIEWER", self.select_and_view)
         self.btn_export = self.create_btn("🪐 BLENDER EXPORT", self.select_and_export)
+        self.btn_folder = self.create_btn("📂 OPEN DATA FOLDER", self.open_data_folder)
         
         grid.addWidget(self.btn_capture, 0, 0)
         grid.addWidget(self.btn_bake, 0, 1)
         grid.addWidget(self.btn_view, 1, 0)
         grid.addWidget(self.btn_export, 1, 1)
+        grid.addWidget(self.btn_folder, 2, 0, 1, 2)
         layout.addLayout(grid)
 
         # --- Footer Actions ---
@@ -163,6 +165,13 @@ class MotionForgeDashboard(QtWidgets.QMainWindow):
     # --- Commands ---
     def run_capture(self): self.run_script("capture.py")
     def run_calibrate(self): self.run_script("calibrate.py")
+    
+    def open_data_folder(self):
+        path = os.path.abspath("data")
+        if os.path.exists(path):
+            os.startfile(path)
+        else:
+            self.set_status("DATA FOLDER NOT FOUND", False)
     
     def select_and_bake(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select Video to Bake", "data", "Videos (*.mp4)")

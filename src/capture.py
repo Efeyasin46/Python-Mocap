@@ -96,6 +96,13 @@ def main():
                 for i, lm in enumerate(results.pose_world_landmarks.landmark):
                     name = mp_holistic.PoseLandmark(i).name
                     frame.world_joints[name] = Joint(x=lm.x, y=lm.y, z=lm.z, confidence=lm.visibility)
+                if not hasattr(self, '_world_log_done'): 
+                    engine_logger.info("WORLD LANDMARKS DETECTED (METERS MODE ACTIVE)")
+                    self._world_log_done = True
+            else:
+                if not hasattr(self, '_world_log_done'):
+                    engine_logger.warning("WORLD LANDMARKS MISSING (FALLBACK TO NORMALIZED)")
+                    self._world_log_done = True
             
             # 1. Smoothing uygula
             frame.joints = smoother.process(frame.joints)

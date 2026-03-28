@@ -237,22 +237,41 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
         if not self.debug_mode:
             points = self.hierarchy.enforce_lengths(points)
         
-        # --- GROUND ALIGNMENT FIX ---
-        # Find lowest part (usually ankles or heels)
-        ground_needed = ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL", "LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX"]
-        y_min = 100
-        for name in ground_needed:
+        # --- GROUND ALIGNMENT --- (Step 7)
+        # In PyQtGraph: Z is Up
+        ground_anchors = ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL"]
+        z_min = 100
+        for name in ground_anchors:
             if name in points:
-                # In PyQtGraph: X=horiz, Y=depth, Z=up
-                if points[name][2] < y_min: y_min = points[name][2]
+                if points[name][2] < z_min: z_min = points[name][2]
         
         # Apply ground offset (Lowest Point = 0)
-        offset = -y_min
+        offset = -z_min
         for name in points:
             points[name][2] += offset
         
         self.draw_meshes(points)
+        
+        # Optionally draw RAW points in RED if debug is ON (Step 8)
+        if self.debug_mode:
+            raw_points = f1.get_world_coords(scale_factor=1.0) # Raw unconstrained
+            self.draw_debug_points(raw_points)
+            
         self.lbl_frame.setText(f"FRAME: {idx} / {len(self.frames)}")
+
+    def draw_debug_points(self, points):
+        """Draws small red cubes/points for RAW data comparison."""
+        for name, pos in points.items():
+            debug_name = f"debug_{name}"
+            if debug_name not in self.joint_meshes:
+                mesh = gl.GLMeshItem(meshdata=self.sphere_data, color=(1, 0, 0, 0.5), shader='shaded')
+                self.view.addItem(mesh)
+                self.joint_meshes[debug_name] = mesh
+            
+            tr = QtGui.QMatrix4x4()
+            tr.translate(pos[0], pos[1], pos[2])
+            tr.scale(0.3, 0.3, 0.3) # Smaller for debug
+            self.joint_meshes[debug_name].setTransform(tr)
 
     def draw_meshes(self, points):
         import mediapipe as mp
@@ -260,37 +279,74 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
         
         # Color Palettes
         colors = {
-            "Spine": (0, 1, 1, 0.8),    # Cyan
-            "Arms": (1, 0, 1, 0.8),     # Magenta
-            "Legs": (1, 1, 0, 0.8),     # Yellow
-            "Head": (1, 0.5, 0, 0.9),   # Orange
-            "Hands": (1, 1, 1, 0.7)     # White
+            "Spine": (0, 1, 1, 0.7),    # Cyan
+            "Arms": (1, 0, 1, 0.7),     # Magenta
+            "Legs": (1, 1, 0, 0.7),     # Yellow
+            "Head": (1, 0.5, 0, 0.8),   # Orange
+            "Hands": (1, 1, 1, 0.5)     # White
         }
 
-        # 1. Update Joints
+        # --- A. SPECIAL MESHES (TORSO & HEAD) ---
+        # 1. Torso Volume
+        ls, rs = points.get("LEFT_SHOULDER"), points.get("RIGHT_SHOULDER")
+        lh, rh = points.get("LEFT_HIP"), points.get("RIGHT_HIP")
+        if ls is not None and rs is not None and lh is not None and rh is not None:
+            # Chest Center & Hip Center
+            chest = (ls + rs) / 2
+            waist = (lh + rh) / 2
+            
+            if "TORSO_BLOCK" not in self.joint_meshes:
+                mesh = gl.GLMeshItem(meshdata=self.cylinder_data, color=colors["Spine"], shader='shaded', smooth=True)
+                self.view.addItem(mesh)
+                self.joint_meshes["TORSO_BLOCK"] = mesh
+            
+            # Draw as a thick cylinder
+            tr = MeshUtils.get_bone_matrix(waist, chest, thickness=0.08)
+            if tr: self.joint_meshes["TORSO_BLOCK"].setTransform(tr)
+
+        # 2. Head Volume
+        nose = points.get("NOSE")
+        if nose is not None:
+            if "HEAD_BLOCK" not in self.joint_meshes:
+                mesh = gl.GLMeshItem(meshdata=self.sphere_data, color=colors["Head"], shader='shaded', smooth=True)
+                self.view.addItem(mesh)
+                self.joint_meshes["HEAD_BLOCK"] = mesh
+            
+            htrans = QtGui.QMatrix4x4()
+            htrans.translate(nose[0], nose[1], nose[2])
+            htrans.scale(0.1, 0.1, 0.12) # Head shape
+            self.joint_meshes["HEAD_BLOCK"].setTransform(htrans)
+
+        # --- B. JOINTS (Subtle Spheres) ---
         for name, pos in points.items():
+            if name in ["NOSE", "LEFT_EYE", "RIGHT_EYE", "LEFT_EAR", "RIGHT_EAR"]: continue # Hidden in head
+            
             if name not in self.joint_meshes:
                 # Size by importance
-                size = 0.02
+                size = 0.015 # default subtle
                 color = colors["Hands"]
-                if "SHOULDER" in name or "HIP" in name: size = 0.035; color = colors["Spine"]
-                if "EYE" in name or "NOSE" in name or "EAR" in name: size = 0.015; color = colors["Head"]
+                
+                if "SHOULDER" in name or "HIP" in name: size = 0.025; color = colors["Spine"]
+                if "ELBOW" in name or "KNEE" in name: size = 0.02
                 
                 mesh = gl.GLMeshItem(meshdata=self.sphere_data, color=color, shader='shaded', smooth=True)
                 self.view.addItem(mesh)
                 self.joint_meshes[name] = mesh
             
-            tr = QtGui.QMatrix4x4()
-            tr.translate(pos[0], pos[1], pos[2])
-            self.joint_meshes[name].setTransform(tr)
+            jtrans = QtGui.QMatrix4x4()
+            jtrans.translate(pos[0], pos[1], pos[2])
+            j_size = 0.015
+            if "SHOULDER" in name or "HIP" in name: j_size = 0.025
+            jtrans.scale(j_size, j_size, j_size)
+            self.joint_meshes[name].setTransform(jtrans)
 
-        # 2. Update Bones
+        # --- C. BONES (Humanoid Proportions) ---
         for conn in connections:
             start_name = mp.solutions.holistic.PoseLandmark(conn[0]).name
             end_name = mp.solutions.holistic.PoseLandmark(conn[1]).name
             
             if start_name in points and end_name in points:
-                bone_id = (start_name, end_name)
+                bone_id = f"{start_name}_{end_name}"
                 p1, p2 = points[start_name], points[end_name]
                 
                 if bone_id not in self.bone_meshes:
@@ -300,15 +356,28 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
                     if "KNEE" in start_name or "ANKLE" in start_name: color = colors["Legs"]
                     if "EYE" in start_name or "NOSE" in start_name: color = colors["Head"]
                     
-                    # Bone thickness
-                    thickness = 0.012
-                    if "HIP" in start_name and "HIP" in end_name: thickness = 0.03
-                    if "SHOULDER" in start_name and "SHOULDER" in end_name: thickness = 0.025
+                    # Bone thickness (Humanoid Proportions)
+                    thickness = 0.03 # Thicker limbs
+                    if "HIP" in start_name and "KNEE" in end_name: thickness = 0.05
+                    if "KNEE" in start_name and "ANKLE" in end_name: thickness = 0.04
+                    if "SHOULDER" in start_name and "ELBOW" in end_name: thickness = 0.04
+                    if "ELBOW" in start_name and "WRIST" in end_name: thickness = 0.025
+                    
+                    if "HIP" in start_name and "HIP" in end_name: thickness = 0.06
+                    if "SHOULDER" in start_name and "SHOULDER" in end_name: thickness = 0.05
                     
                     mesh = gl.GLMeshItem(meshdata=self.cylinder_data, color=color, shader='shaded', smooth=True)
                     self.view.addItem(mesh)
                     self.bone_meshes[bone_id] = {"item": mesh, "thick": thickness}
                 
+                # Step 5: Prevent drawing if distance is near zero
+                dist = np.linalg.norm(p2 - p1)
+                if dist < 0.001:
+                    self.bone_meshes[bone_id]["item"].setVisible(False)
+                    continue
+                else:
+                    self.bone_meshes[bone_id]["item"].setVisible(True)
+
                 # Update Transform
                 tr = MeshUtils.get_bone_matrix(p1, p2, thickness=self.bone_meshes[bone_id]["thick"])
                 if tr:

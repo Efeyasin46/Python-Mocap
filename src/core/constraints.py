@@ -81,6 +81,7 @@ class MotionStabilizer:
                 if name in critical_joints:
                     if name in self.locked_positions:
                         # Eğer kilitliyse ve hız hala düşükse veya dikey hareket azsa kilidi koru
+                        # MediaPipe Y is Vertical (Down)
                         vertical_delta = abs(curr_pos[1] - self.locked_positions[name][1])
                         if velocity < self.lock_threshold and vertical_delta < 0.01:
                             curr_pos = self.locked_positions[name]
@@ -94,4 +95,45 @@ class MotionStabilizer:
             self.prev_joints[name] = curr_pos
             stabilized[name] = Joint(x=float(curr_pos[0]), y=float(curr_pos[1]), z=float(curr_pos[2]), confidence=joint.confidence)
             
+        # --- [NEW] BILATERAL FOOT DEPTH SYNC ---
+        # If both feet are still and close in depth, snap them together
+        la = stabilized.get("LEFT_ANKLE")
+        ra = stabilized.get("RIGHT_ANKLE")
+        if la and ra:
+            dist_z = abs(la.z - ra.z)
+            # if they are within 10cm depth-wise and stationary
+            if dist_z < 0.08 and self.velocities.get("LEFT_ANKLE", 1) < self.lock_threshold:
+                target_z = (la.z + ra.z) / 2
+                stabilized["LEFT_ANKLE"].z = target_z
+                stabilized["RIGHT_ANKLE"].z = target_z
+
         return stabilized
+
+class BilateralDepthStabilizer:
+    """
+    Elite Bake-Pass Post-Processor.
+    Syncs feet depth across a recorded sequence to eliminate 'one foot ahead' jitter.
+    """
+    @staticmethod
+    def process_sequence(frames: List[MocapFrame]):
+        if len(frames) < 10: return frames
+        
+        for i in range(1, len(frames) - 1):
+            f = frames[i]
+            la = f.joints.get("LEFT_ANKLE")
+            ra = f.joints.get("RIGHT_ANKLE")
+            
+            if la and ra:
+                # Detect standing pose: Feet are horizontally apart but depth-wise close
+                width = abs(la.x - ra.x)
+                depth_diff = abs(la.z - ra.z)
+                
+                # If feet are within 10cm depth and have high confidence
+                if depth_diff < 0.1 and la.confidence > 0.6 and ra.confidence > 0.6:
+                    # Apply a smoothing bias toward the average depth
+                    avg_z = (la.z + ra.z) / 2
+                    alpha = 0.5 # 50% bias toward alignment
+                    la.z = la.z * (1-alpha) + avg_z * alpha
+                    ra.z = ra.z * (1-alpha) + avg_z * alpha
+        
+        return frames

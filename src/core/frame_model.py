@@ -52,46 +52,65 @@ class MocapFrame:
         source = self.world_joints if self.world_joints else self.joints
         if not source: return False
         
-        # Check if critical joints exist and are visible
-        critical = ["LEFT_HIP", "RIGHT_HIP"]
-        for c in critical:
-            j = source.get(c)
-            if not j or np.isnan(j.x) or j.confidence < 0.3:
-                return False
+        # 1. Hips check (Critical for Root)
+        lh, rh = source.get("LEFT_HIP"), source.get("RIGHT_HIP")
+        if not lh or not rh or lh.confidence < 0.3 or rh.confidence < 0.3:
+            return False
+            
+        # 2. Shoulders check (Critical for Spine)
+        ls, rs = source.get("LEFT_SHOULDER"), source.get("RIGHT_SHOULDER")
+        if not ls or not rs or ls.confidence < 0.3 or rs.confidence < 0.3:
+            return False
+            
         return True
 
-    def get_world_coords(self) -> Dict[str, np.ndarray]:
+    def get_world_coords(self, scale_factor=5.0) -> Dict[str, np.ndarray]:
         """
-        Converts MediaPipe World (Meters) to Engine Space with requested mapping:
-        X_eng = X_mp
-        Y_eng = -Z_mp (Corrects depth to vertical UP)
-        Z_eng = Y_mp (Forward/Back)
+        --- NEXUS PATCH 2: AUTO-HEIGHT NORMALIZER ---
+        1. Correct Axis Mapping: X=x, Y=-z, Z=y
+        2. Auto-Scale: Prevents 'nested spheres' by ensuring human proportions.
         """
-        source = self.world_joints if self.world_joints else self.joints
-        if not source: return {}
+        # Source Priority: World Meters > Normalized 
+        has_world = bool(self.world_joints)
+        source = self.world_joints if has_world else self.joints
+        if not source or not self.is_valid(): return {}
 
-        # 1. Calculate ROOT (Midpoint of Hips)
-        lh = source.get("LEFT_HIP")
-        rh = source.get("RIGHT_HIP")
-        if not lh or not rh: return {}
+        # 1. HIPS ROOT (Central Pivot)
+        lh, rh = source["LEFT_HIP"], source["RIGHT_HIP"]
+        root = np.array([(lh.x + rh.x) / 2, (lh.y + rh.y) / 2, (lh.z + rh.z) / 2])
         
-        root_x = (lh.x + rh.x) / 2
-        root_y = (lh.y + rh.y) / 2
-        root_z = (lh.z + rh.z) / 2
+        # 2. AUTO-SCALE CALCULATION (Keep skeleton readable)
+        # We target a height of approx 2.0 units in the world.
+        actual_height = 1.0
+        if "LEFT_SHOULDER" in source and "LEFT_HIP" in source:
+            # Measure torso length as a proxy for scale
+            sh, hp = source["LEFT_SHOULDER"], source["LEFT_HIP"]
+            actual_height = np.sqrt((sh.x-hp.x)**2 + (sh.y-hp.y)**2 + (sh.z-hp.z)**2)
         
+        # If height is too small (e.g. normalized [0,1] or missing depth), boost scale
+        if has_world:
+            final_scale = scale_factor 
+        else:
+            # Normalized Fallback: Height of torso is typically 0.3-0.4.
+            # We want that 0.3 to become 2.0 units on grid.
+            final_scale = 5.0 / actual_height if actual_height > 0.05 else 20.0
+
         world_points = {}
         for name, joint in source.items():
-            # 2. To Local Space (Relative to Hips)
-            lx = joint.x - root_x
-            ly = joint.y - root_y
-            lz = joint.z - root_z
+            # 3. RELATIVE TO ROOT
+            lx = (joint.x - root[0]) * final_scale
+            ly = (joint.y - root[1]) * final_scale
+            lz = (joint.z - root[2]) * final_scale
             
-            # 3. Apply User's Axis Mapping: X=X, Y=-Z, Z=Y
-            ex = lx
-            ey = -lz # -Depth -> UP
-            ez = ly  # Vertical -> Forward/Back
+            # 4. FINAL UPRIGHT MAPPING (NEXUS STANDARD)
+            # MediaPipe: x=right, y=down, z=depth
+            # PyQtGraph: X=horiz, Y=depth, Z=up
             
-            world_points[name] = np.array([ex, ey, ez])
+            pg_x = lx   # Right -> Right
+            pg_y = lz   # Depth -> Depth
+            pg_z = -ly  # -Down -> UP (Karakteri ayağa kaldırır)
+            
+            world_points[name] = np.array([pg_x, pg_y, pg_z])
             
         return world_points
 
