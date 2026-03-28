@@ -19,9 +19,16 @@ lib64/
 parts/
 sdist/
 var/
+env/
+env311/
+__pycache__/
+data/
 wheels/
 share/python-wheels/
 *.egg-info/
+*.pyc
+*.mp4
+*.json
 .installed.cfg
 *.egg
 MANIFEST
