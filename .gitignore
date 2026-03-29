@@ -22,6 +22,8 @@ var/
 env/
 env311/
 __pycache__/
+dist/
+build/
 data/
 wheels/
 share/python-wheels/
