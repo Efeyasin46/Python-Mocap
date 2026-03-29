@@ -125,9 +125,10 @@ def main():
     out_json = f"data/{basename}_blender.json"
     out_report = f"data/{basename}_debug_report.json"
     
-    exporter.export(out_json, out_report)
+    out_json, out_report, out_bvh = exporter.export(out_json, out_report)
     print(f"\n--- BLENDER EXPORT COMPLETE ---")
-    print(f"Ready for Blender: {out_json}")
+    print(f"Standard BVH (Import this!): {out_bvh}")
+    print(f"Nexus JSON (Custom Bridge): {out_json}")
     print(f"Debug Report: {out_report}")
 
 if __name__ == "__main__":

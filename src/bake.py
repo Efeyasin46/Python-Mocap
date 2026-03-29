@@ -78,6 +78,11 @@ def main():
                     name = mp_holistic.PoseLandmark(i).name
                     m_frame.joints[name] = Joint(x=lm.x, y=lm.y, z=lm.z, confidence=lm.visibility)
             
+            if results.pose_world_landmarks:
+                for i, lm in enumerate(results.pose_world_landmarks.landmark):
+                    name = mp_holistic.PoseLandmark(i).name
+                    m_frame.world_joints[name] = Joint(x=lm.x, y=lm.y, z=lm.z, confidence=lm.visibility)
+            
             # Smoothing & Stabilization
             m_frame.joints = smoother.process(m_frame.joints)
             m_frame.joints = stabilizer.process(m_frame.joints)

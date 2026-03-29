@@ -1,6 +1,7 @@
 import numpy as np
-from typing import Dict, Any
-from .frame_model import MocapFrame, Joint
+from typing import Dict, Any, List
+from core.frame_model import MocapFrame, Joint
+from core.logger import engine_logger
 
 class BoneConstraint:
     @staticmethod
@@ -128,12 +129,23 @@ class BilateralDepthStabilizer:
                 width = abs(la.x - ra.x)
                 depth_diff = abs(la.z - ra.z)
                 
+                alpha = 0.5 # [FIXED SCOPE]
+                
                 # If feet are within 10cm depth and have high confidence
                 if depth_diff < 0.1 and la.confidence > 0.6 and ra.confidence > 0.6:
                     # Apply a smoothing bias toward the average depth
                     avg_z = (la.z + ra.z) / 2
-                    alpha = 0.5 # 50% bias toward alignment
                     la.z = la.z * (1-alpha) + avg_z * alpha
                     ra.z = ra.z * (1-alpha) + avg_z * alpha
+                    
+                # [NEW] Also sync WORLD JOINTS (Meters) for Nexus Pro Viewport
+                wla = f.world_joints.get("LEFT_ANKLE")
+                wra = f.world_joints.get("RIGHT_ANKLE")
+                if wla and wra:
+                    w_depth_diff = abs(wla.z - wra.z)
+                    if w_depth_diff < 0.1: # 10cm world scale
+                        w_avg_z = (wla.z + wra.z) / 2
+                        wla.z = wla.z * (1-alpha) + w_avg_z * alpha
+                        wra.z = wra.z * (1-alpha) + w_avg_z * alpha
         
         return frames

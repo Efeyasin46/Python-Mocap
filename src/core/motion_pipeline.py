@@ -1,7 +1,7 @@
 import time
 from typing import List, Optional, Callable, Any
-from .frame_model import MocapFrame, Joint
-from .logger import engine_logger
+from core.frame_model import MocapFrame, Joint
+from core.logger import engine_logger
 
 class MotionPipeline:
     """
