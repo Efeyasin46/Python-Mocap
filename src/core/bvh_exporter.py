@@ -9,34 +9,53 @@ class BVHExporter:
     Rotasyon tabanlı iskelet animasyonu ve Blender uyumlu kanal sıralaması.
     """
     
-    # 🟢 TAM İNSANSI HİYERARŞİSİ (BVH FORMATLI)
-    # { "Joint": ["Children List"] }
+    # 🟢 STANDARD HUMANOID HIERARCHY (MIXAMO BASE)
+    # Mapping MediaPipe -> Standard
+    MAP = {
+        "HIPS": "Hips",
+        "SPINE": "Spine",
+        "CHEST": "Spine1",
+        "NECK": "Neck",
+        "HEAD": "Head",
+        "LEFT_SHOULDER": "LeftShoulder",
+        "LEFT_ELBOW": "LeftArm",
+        "LEFT_WRIST": "LeftForeArm",
+        "RIGHT_SHOULDER": "RightShoulder",
+        "RIGHT_ELBOW": "RightArm",
+        "RIGHT_WRIST": "RightForeArm",
+        "LEFT_HIP": "LeftUpLeg",
+        "LEFT_KNEE": "LeftLeg",
+        "LEFT_ANKLE": "LeftFoot",
+        "RIGHT_HIP": "RightUpLeg",
+        "RIGHT_KNEE": "RightLeg",
+        "RIGHT_ANKLE": "RightFoot"
+    }
+
     TREE = {
-        "HIPS": ["SPINE", "LEFT_HIP", "RIGHT_HIP"],
-        "SPINE": ["CHEST"],
-        "CHEST": ["NECK", "LEFT_SHOULDER", "RIGHT_SHOULDER"],
-        "NECK": ["HEAD"],
-        "HEAD": [],
+        "Hips": ["Spine", "LeftUpLeg", "RightUpLeg"],
+        "Spine": ["Spine1"],
+        "Spine1": ["Neck", "LeftShoulder", "RightShoulder"],
+        "Neck": ["Head"],
+        "Head": [],
         
-        "LEFT_SHOULDER": ["LEFT_ELBOW"],
-        "LEFT_ELBOW": ["LEFT_WRIST"],
-        "LEFT_WRIST": [],
+        "LeftShoulder": ["LeftArm"],
+        "LeftArm": ["LeftForeArm"],
+        "LeftForeArm": [],
         
-        "RIGHT_SHOULDER": ["RIGHT_ELBOW"],
-        "RIGHT_ELBOW": ["RIGHT_WRIST"],
-        "RIGHT_WRIST": [],
+        "RightShoulder": ["RightArm"],
+        "RightArm": ["RightForeArm"],
+        "RightForeArm": [],
         
-        "LEFT_HIP": ["LEFT_KNEE"],
-        "LEFT_KNEE": ["LEFT_ANKLE"],
-        "LEFT_ANKLE": [],
+        "LeftUpLeg": ["LeftLeg"],
+        "LeftLeg": ["LeftFoot"],
+        "LeftFoot": [],
         
-        "RIGHT_HIP": ["RIGHT_KNEE"],
-        "RIGHT_KNEE": ["RIGHT_ANKLE"],
-        "RIGHT_ANKLE": []
+        "RightUpLeg": ["RightLeg"],
+        "RightLeg": ["RightFoot"],
+        "RightFoot": []
     }
     
-    # End Site (Uç Nokta) Gerektiren Eklemler
-    END_SITES = ["HEAD", "LEFT_WRIST", "RIGHT_WRIST", "LEFT_ANKLE", "RIGHT_ANKLE"]
+    END_SITES = ["Head", "LeftForeArm", "RightForeArm", "LeftFoot", "RightFoot"]
 
     def __init__(self, frames: List[MocapFrame]):
         self.frames = frames
@@ -89,28 +108,30 @@ class BVHExporter:
     def export(self, output_path: str):
         if not self.frames: return
         
-        # 1. İlk kare üzerinden Yerel Offset (Kemik Boyu) hesapla
-        # İlk kare T-Pose kabul edilir
-        first_frame_coords = self.frames[0].get_world_coords(scale_factor=1.0)
+        # 1. Map MediaPipe coords to Standard Names
+        first_frame_coords_raw = self.frames[0].get_world_coords(scale_factor=1.0)
+        first_frame_coords = {self.MAP.get(k, k): v for k, v in first_frame_coords_raw.items()}
+        
         offsets = self._calculate_local_offsets(first_frame_coords)
         
         # 2. Hiyerarşi Bloğu Oluştur
         self.motion_order = []
         hierarchy_lines = ["HIERARCHY"]
-        hierarchy_lines.extend(self._build_joint_str("HIPS", offsets, 0))
+        hierarchy_lines.extend(self._build_joint_str("Hips", offsets, 0))
         
         # 3. Motion Bloğu Oluştur
         motion_lines = ["MOTION", f"Frames: {len(self.frames)}", f"Frame Time: {1.0/self.fps:.6f}"]
         
         for frame in self.frames:
-            coords = frame.get_world_coords(scale_factor=1.0)
+            coords_raw = frame.get_world_coords(scale_factor=1.0)
+            coords = {self.MAP.get(k, k): v for k, v in coords_raw.items()}
             motion_line = []
             
             # DFS Sırasıyla Verileri Yaz
             for joint_name in self.motion_order:
                 pos = coords.get(joint_name, np.array([0,0,0]))
                 
-                if joint_name == "HIPS":
+                if joint_name == "Hips":
                     # Kök Pozisyonu (X, Y, Z) + Rotasyon (6 Kanal)
                     # BVH Space: X=Right, Y=Up, Z=Back
                     bx, by, bz = pos[0]*self.scale, pos[2]*self.scale, -pos[1]*self.scale
@@ -153,7 +174,7 @@ class BVHExporter:
                 # Nexus -> BVH Eksenleri
                 offsets[child] = np.array([rel[0], rel[2], -rel[1]])
         
-        offsets["HIPS"] = np.array([0.0, 0.0, 0.0])
+        offsets["Hips"] = np.array([0.0, 0.0, 0.0])
         return offsets
 
     def _get_parent(self, name: str) -> Optional[str]:
@@ -167,7 +188,7 @@ class BVHExporter:
         off = offsets.get(name, np.array([0.0, 0.0, 0.0]))
         
         lines = []
-        if name == "HIPS":
+        if name == "Hips":
             lines.append(f"{space}ROOT {name}")
             channels = "6 Xposition Yposition Zposition Zrotation Xrotation Yrotation"
         else:

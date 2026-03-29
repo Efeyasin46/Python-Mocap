@@ -141,12 +141,20 @@ class MotionForgeDashboard(QtWidgets.QMainWindow):
     def run_script(self, script_name, args=None):
         self.set_status(f"LAUNCHING {script_name}...")
         
-        python_exe = os.path.join("env311", "Scripts", "python.exe")
-        if not os.path.exists(python_exe): python_exe = sys.executable 
-            
-        script_path = os.path.join("src", script_name)
-        cmd = [python_exe, script_path]
-        if args: cmd.extend(args)
+        module_name = script_name.replace('.py', '')
+        
+        # Check if we are running as a compiled exe
+        if getattr(sys, 'frozen', False):
+            # Running as compiled EXE
+            cmd = [sys.executable, "--module", module_name]
+            if args: cmd.extend(args)
+        else:
+            # Running as Python script
+            python_exe = os.path.join("env311", "Scripts", "python.exe")
+            if not os.path.exists(python_exe): python_exe = sys.executable 
+            script_path = os.path.join("src", script_name)
+            cmd = [python_exe, script_path]
+            if args: cmd.extend(args)
         
         def _launch():
             try:
@@ -202,12 +210,39 @@ class MotionForgeDashboard(QtWidgets.QMainWindow):
 def main():
     print("Launcher Main Start")
     app = QtWidgets.QApplication(sys.argv)
-    
-    # Modern font loading (optional, using Segoe UI default)
     window = MotionForgeDashboard()
     print("Window created, calling show()")
     window.show()
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
+    # --- STANDALONE EXE ROUTING ---
+    if len(sys.argv) > 1 and sys.argv[1] == "--module":
+        module_name = sys.argv[2]
+        # Modify sys.argv to hide the routing args from the underlying scripts
+        sys.argv = [sys.argv[0]] + sys.argv[3:]
+        
+        # Add src to path if needed for imports
+        src_path = os.path.dirname(os.path.abspath(__file__))
+        if src_path not in sys.path:
+            sys.path.insert(0, src_path)
+            
+        if module_name == "capture":
+            from capture import main as run_module
+        elif module_name == "bake":
+            from bake import main as run_module
+        elif module_name == "viewer":
+            from viewer import main as run_module
+        elif module_name == "export_blender":
+            from export_blender import main as run_module
+        elif module_name == "calibrate":
+            from calibrate import main as run_module
+        else:
+            engine_logger.error(f"Unknown module requested: {module_name}")
+            sys.exit(1)
+            
+        run_module()
+        sys.exit(0)
+    
+    # --- NORMAL GUI LAUNCH ---
     main()

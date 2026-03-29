@@ -57,95 +57,93 @@ class SmoothingFilter:
             smoothed[name] = Joint(x=float(new_pos[0]), y=float(new_pos[1]), z=float(new_pos[2]), confidence=joint.confidence)
         return smoothed
 
-class MotionStabilizer:
-    def __init__(self, still_threshold: float = 0.008, lock_threshold: float = 0.02):
-        self.still_threshold = still_threshold
-        self.lock_threshold = lock_threshold
-        self.locked_positions: Dict[str, np.ndarray] = {}
+class AdaptiveSmoothingFilter:
+    """
+    v2.7 Pro: Smarter smoothing that reduces lag during fast movements.
+    - High Velocity -> Lower Alpha (Less smoothing, higher responsiveness)
+    - Low Velocity -> Higher Alpha (More smoothing, max stability)
+    """
+    def __init__(self, min_alpha: float = 0.2, max_alpha: float = 0.8, velocity_threshold: float = 0.05):
+        self.min_alpha = min_alpha
+        self.max_alpha = max_alpha
+        self.v_threshold = velocity_threshold
         self.prev_joints: Dict[str, np.ndarray] = {}
-        self.velocities: Dict[str, float] = {}
+
+    def process(self, joints: Dict[str, Joint]) -> Dict[str, Joint]:
+        smoothed = {}
+        for name, joint in joints.items():
+            curr_pos = np.array([joint.x, joint.y, joint.z])
+            if name in self.prev_joints:
+                # Calculate local velocity
+                vel = np.linalg.norm(curr_pos - self.prev_joints[name])
+                # Adaptive Alpha: Scale between min/max based on velocity
+                # If vel is high, we want more 'current' data (low smoothing)
+                # If vel is low, we want more 'prev' data (high smoothing)
+                alpha = np.clip(1.0 - (vel / self.v_threshold), self.min_alpha, self.max_alpha)
+                new_pos = alpha * self.prev_joints[name] + (1 - alpha) * curr_pos
+            else:
+                new_pos = curr_pos
+            
+            self.prev_joints[name] = new_pos
+            smoothed[name] = Joint(x=float(new_pos[0]), y=float(new_pos[1]), z=float(new_pos[2]), confidence=joint.confidence)
+        return smoothed
+
+class MotionStabilizer:
+    """
+    v2.7 FootLock System:
+    Pinning foot positions to floor when velocity is near zero.
+    """
+    def __init__(self, lock_threshold: float = 0.002, still_threshold: float = 0.005):
+        self.lock_threshold = lock_threshold
+        self.still_threshold = still_threshold
+        self.pinned_positions: Dict[str, np.ndarray] = {}
+        self.prev_joints: Dict[str, np.ndarray] = {}
 
     def process(self, joints: Dict[str, Joint]) -> Dict[str, Joint]:
         stabilized = {}
-        
-        # Kritik noktalar (ayaklar, dizler, kalça)
-        critical_joints = ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_KNEE", "RIGHT_KNEE", "LEFT_HIP", "RIGHT_HIP", "LEFT_HEEL", "RIGHT_HEEL", "LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX"]
+        # Foot Landmarks
+        foot_joints = ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL", "LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX"]
         
         for name, joint in joints.items():
             curr_pos = np.array([joint.x, joint.y, joint.z])
             
-            if name in self.prev_joints:
+            if name in foot_joints and name in self.prev_joints:
                 velocity = np.linalg.norm(curr_pos - self.prev_joints[name])
-                self.velocities[name] = float(velocity)
                 
-                # Mikrotitreme Filtresi & Foot Lock
-                if name in critical_joints:
-                    if name in self.locked_positions:
-                        # Eğer kilitliyse ve hız hala düşükse veya dikey hareket azsa kilidi koru
-                        # MediaPipe Y is Vertical (Down)
-                        vertical_delta = abs(curr_pos[1] - self.locked_positions[name][1])
-                        if velocity < self.lock_threshold and vertical_delta < 0.01:
-                            curr_pos = self.locked_positions[name]
-                        else:
-                            del self.locked_positions[name]
+                if name in self.pinned_positions:
+                    # If pinned, only release if it moves significantly
+                    if velocity < self.still_threshold:
+                        curr_pos = self.pinned_positions[name]
                     else:
-                        # Kilitleme kontrolü
-                        if velocity < self.still_threshold:
-                            self.locked_positions[name] = curr_pos
+                        del self.pinned_positions[name]
+                else:
+                    # Lock it if it's very still
+                    if velocity < self.lock_threshold:
+                        self.pinned_positions[name] = curr_pos
             
             self.prev_joints[name] = curr_pos
             stabilized[name] = Joint(x=float(curr_pos[0]), y=float(curr_pos[1]), z=float(curr_pos[2]), confidence=joint.confidence)
             
-        # --- [NEW] BILATERAL FOOT DEPTH SYNC ---
-        # If both feet are still and close in depth, snap them together
-        la = stabilized.get("LEFT_ANKLE")
-        ra = stabilized.get("RIGHT_ANKLE")
-        if la and ra:
-            dist_z = abs(la.z - ra.z)
-            # if they are within 10cm depth-wise and stationary
-            if dist_z < 0.08 and self.velocities.get("LEFT_ANKLE", 1) < self.lock_threshold:
-                target_z = (la.z + ra.z) / 2
-                stabilized["LEFT_ANKLE"].z = target_z
-                stabilized["RIGHT_ANKLE"].z = target_z
-
         return stabilized
 
-class BilateralDepthStabilizer:
+class GroundAligner:
     """
-    Elite Bake-Pass Post-Processor.
-    Syncs feet depth across a recorded sequence to eliminate 'one foot ahead' jitter.
+    v2.7 Auto Floor Detection.
     """
     @staticmethod
-    def process_sequence(frames: List[MocapFrame]):
-        if len(frames) < 10: return frames
+    def align_to_floor(frame: MocapFrame):
+        points = frame.world_joints
+        if not points: return
         
-        for i in range(1, len(frames) - 1):
-            f = frames[i]
-            la = f.joints.get("LEFT_ANKLE")
-            ra = f.joints.get("RIGHT_ANKLE")
-            
-            if la and ra:
-                # Detect standing pose: Feet are horizontally apart but depth-wise close
-                width = abs(la.x - ra.x)
-                depth_diff = abs(la.z - ra.z)
-                
-                alpha = 0.5 # [FIXED SCOPE]
-                
-                # If feet are within 10cm depth and have high confidence
-                if depth_diff < 0.1 and la.confidence > 0.6 and ra.confidence > 0.6:
-                    # Apply a smoothing bias toward the average depth
-                    avg_z = (la.z + ra.z) / 2
-                    la.z = la.z * (1-alpha) + avg_z * alpha
-                    ra.z = ra.z * (1-alpha) + avg_z * alpha
-                    
-                # [NEW] Also sync WORLD JOINTS (Meters) for Nexus Pro Viewport
-                wla = f.world_joints.get("LEFT_ANKLE")
-                wra = f.world_joints.get("RIGHT_ANKLE")
-                if wla and wra:
-                    w_depth_diff = abs(wla.z - wra.z)
-                    if w_depth_diff < 0.1: # 10cm world scale
-                        w_avg_z = (wla.z + wra.z) / 2
-                        wla.z = wla.z * (1-alpha) + w_avg_z * alpha
-                        wra.z = wra.z * (1-alpha) + w_avg_z * alpha
+        # Ground anchors
+        anchors = ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL"]
+        z_min = 100.0
         
-        return frames
+        for name in anchors:
+            if name in points:
+                if points[name].z < z_min: z_min = points[name].z
+        
+        if z_min < 90.0: # Valid detection
+            offset = -z_min
+            for joint in points.values():
+                joint.z += offset

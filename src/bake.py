@@ -11,7 +11,7 @@ from datetime import datetime
 from core.logger import engine_logger
 from core.frame_model import MocapFrame, Joint, UnifiedExporter
 from core.motion_pipeline import MotionPipeline
-from core.constraints import SmoothingFilter, MotionStabilizer, BilateralDepthStabilizer
+from core.constraints import AdaptiveSmoothingFilter, MotionStabilizer, GroundAligner
 from core.skeleton import SkeletonHierarchy
 
 # Global MediaPipe References
@@ -48,8 +48,8 @@ def main():
     
     # 2. Pipeline ve Engine Kurulumu
     pipeline = MotionPipeline()
-    smoother = SmoothingFilter(alpha=0.4) # Offline için daha yumuşak
-    stabilizer = MotionStabilizer(still_threshold=0.003) # Bake için daha katı
+    smoother = AdaptiveSmoothingFilter(min_alpha=0.3, max_alpha=0.9) # v2.7 Adaptive
+    stabilizer = MotionStabilizer() # v2.7 FootLock
     hierarchy = SkeletonHierarchy()
 
     cap = cv2.VideoCapture(input_video)
@@ -96,9 +96,10 @@ def main():
 
     cap.release()
     
-    # --- POST-PROCESSING ENHANCEMENTS ---
-    engine_logger.info("Applying Elite Bilateral Foot Stabilization...")
-    baked_frames = BilateralDepthStabilizer.process_sequence(baked_frames)
+    # --- POST-PROCESSING ENHANCEMENTS v2.7 ---
+    engine_logger.info("Applying Floor Detection & Ground Alignment...")
+    for frame in baked_frames:
+        GroundAligner.align_to_floor(frame)
     
     # Unified Exporter ile Kaydet
     output_filename = f"data/motion_baked_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"

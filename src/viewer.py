@@ -115,23 +115,38 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
         
         # Buttons
         b_layout = QtWidgets.QHBoxLayout()
-        self.btn_play = QtWidgets.QPushButton("PLAY")
+    
+        self.btn_play = QtWidgets.QPushButton("PAUSE")
+        self.btn_play.setFixedWidth(80)
         self.btn_play.clicked.connect(self.toggle_play)
         b_layout.addWidget(self.btn_play)
-        
+    
+        self.chk_loop = QtWidgets.QCheckBox("LOOP")
+        self.chk_loop.setChecked(True)
+        self.chk_loop.clicked.connect(self.toggle_loop)
+        b_layout.addWidget(self.chk_loop)
+    
         self.speed_combo = QtWidgets.QComboBox()
         self.speed_combo.addItems(["0.5x", "1.0x", "2.0x"])
         self.speed_combo.setCurrentIndex(1)
         self.speed_combo.currentIndexChanged.connect(self.update_speed)
         b_layout.addWidget(self.speed_combo)
-        
+    
+        b_layout.addStretch()
+    
         self.btn_debug = QtWidgets.QPushButton("DEBUG: OFF")
         self.btn_debug.setCheckable(True)
         self.btn_debug.clicked.connect(self.toggle_debug)
         b_layout.addWidget(self.btn_debug)
-        
+    
         c_layout.addLayout(b_layout)
         self.layout.addWidget(self.controls)
+    
+        # Logic
+        self.slider.sliderPressed.connect(self.slider_pressed)
+        self.slider.sliderReleased.connect(self.slider_released)
+        self.slider.valueChanged.connect(self.slider_changed)
+        self.is_scrubbing = False
         
         self.hierarchy = SkeletonHierarchy()
         self.debug_mode = False
@@ -176,9 +191,23 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
         self.debug_mode = not self.debug_mode
         self.btn_debug.setText("DEBUG: ON" if self.debug_mode else "DEBUG: OFF")
 
+    def toggle_loop(self):
+        self.loop = self.chk_loop.isChecked()
+
     def update_speed(self):
         speed_str = self.speed_combo.currentText().replace("x", "")
         self.playback_speed = float(speed_str)
+
+    def slider_pressed(self):
+        self.is_scrubbing = True
+
+    def slider_released(self):
+        self.is_scrubbing = False
+
+    def slider_changed(self, val):
+        if self.is_scrubbing and self.frames:
+            self.current_time = self.frames[val].timestamp
+            self.render_interpolated(self.current_time)
 
     def engine_tick(self):
         now = time.time()
@@ -252,10 +281,16 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
         
         self.draw_meshes(points)
         
-        # Optionally draw RAW points in RED if debug is ON (Step 8)
+        # --- DEBUG MODE v2.7 ---
         if self.debug_mode:
-            raw_points = f1.get_world_coords(scale_factor=1.0) # Raw unconstrained
+            # 1. Raw comparison points
+            raw_points = f1.get_world_coords(scale_factor=1.0)
+            for name, r_pos in raw_points.items():
+                r_pos[2] += offset # Apply same ground offset
             self.draw_debug_points(raw_points)
+            
+            # 2. Velocity Vectors (Example for feet)
+            self.draw_velocity_vectors(f1, f2, offset)
             
         self.lbl_frame.setText(f"FRAME: {idx} / {len(self.frames)}")
 
@@ -270,8 +305,34 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
             
             tr = QtGui.QMatrix4x4()
             tr.translate(pos[0], pos[1], pos[2])
-            tr.scale(0.3, 0.3, 0.3) # Smaller for debug
+            tr.scale(0.01, 0.01, 0.01) # Small red dots
             self.joint_meshes[debug_name].setTransform(tr)
+
+    def draw_velocity_vectors(self, f1, f2, z_offset):
+        """Draws yellow lines indicating joint velocity in debug mode."""
+        coords1 = f1.get_world_coords()
+        coords2 = f2.get_world_coords()
+        
+        # We only draw for critical joints to avoid clutter
+        critical = ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_WRIST", "RIGHT_WRIST", "NOSE"]
+        
+        for name in critical:
+            if name in coords1 and name in coords2:
+                p1 = coords1[name]
+                p2 = coords2[name]
+                p1[2] += z_offset
+                p2[2] += z_offset
+                
+                # Draw a line between p2 and p2 + (p2-p1)*5 (velocity amplification for visibility)
+                vel = (p2 - p1) * 10
+                v_name = f"vel_{name}"
+                
+                if v_name not in self.bone_meshes:
+                    mesh = gl.GLLinePlotItem(color=(1, 1, 0, 1), width=2)
+                    self.view.addItem(mesh)
+                    self.bone_meshes[v_name] = {"item": mesh}
+                
+                self.bone_meshes[v_name]["item"].setData(pos=np.array([p2, p2 + vel]))
 
     def draw_meshes(self, points):
         import mediapipe as mp
@@ -313,8 +374,10 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
                 self.joint_meshes["HEAD_BLOCK"] = mesh
             
             htrans = QtGui.QMatrix4x4()
-            htrans.translate(nose[0], nose[1], nose[2])
-            htrans.scale(0.1, 0.1, 0.12) # Head shape
+            # Position head slightly above neck center
+            head_center = nose # Simplified for now
+            htrans.translate(head_center[0], head_center[1], head_center[2] + 0.05)
+            htrans.scale(0.08, 0.08, 0.1) # Oval head shape
             self.joint_meshes["HEAD_BLOCK"].setTransform(htrans)
 
         # --- B. JOINTS (Subtle Spheres) ---
