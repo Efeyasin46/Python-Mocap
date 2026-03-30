@@ -9,8 +9,9 @@ from datetime import datetime
 from core.logger import engine_logger
 from core.frame_model import MocapFrame, Joint, UnifiedExporter
 from core.motion_pipeline import MotionPipeline
-from core.constraints import AdaptiveSmoothingFilter, MotionStabilizer
+from core.constraints import AdaptiveSmoothingFilter, MotionStabilizer, FrameDropCompensator
 from core.skeleton import SkeletonHierarchy
+from core.mobile_camera import MobileCameraManager, CameraSourceType
 
 # Global MediaPipe References
 mp_holistic = mp.solutions.holistic
@@ -18,12 +19,51 @@ mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 
 def main():
-    engine_logger.info("Starting MotionForge Mocap Engine (Capture v2.7 Pro)...")
+    engine_logger.info("Starting MotionForge Mocap Engine (Capture v2.8 Pro)...")
+    
+    # --- v2.8 SOURCE SELECTION GUI ---
+    source_type = CameraSourceType.WEBCAM
+    source_info = 0
+    
+    def on_source_select():
+        nonlocal source_type, source_info
+        sel = var.get()
+        if sel == "wifi":
+            source_type = CameraSourceType.MOBILE_WIFI
+            source_info = ip_entry.get().strip()
+        elif sel == "usb":
+            source_type = CameraSourceType.MOBILE_USB
+            source_info = 1
+        root.quit()
+
+    root = tk.Tk()
+    root.title("MotionForge v2.8 - Source Selection")
+    root.geometry("350x250")
+    
+    tk.Label(root, text="Select Camera Source:", font=("Arial", 11, "bold"), fg="#333").pack(pady=10)
+    var = tk.StringVar(value="webcam")
+    
+    tk.Radiobutton(root, text="Standard Webcam", variable=var, value="webcam").pack(anchor="w", padx=40)
+    tk.Radiobutton(root, text="Mobile USB Camera (DroidCam)", variable=var, value="usb").pack(anchor="w", padx=40)
+    tk.Radiobutton(root, text="Mobile WiFi Camera (IP Webcam)", variable=var, value="wifi").pack(anchor="w", padx=40)
+    
+    # Helper entry for IP
+    ip_frame = tk.Frame(root)
+    ip_frame.pack(pady=5)
+    tk.Label(ip_frame, text="IP/Port:", font=("Arial", 9)).pack(side="left")
+    ip_entry = tk.Entry(ip_frame, width=20)
+    ip_entry.insert(0, "192.168.1.55:8080")
+    ip_entry.pack(side="left", padx=5)
+    
+    tk.Button(root, text="CONNECT & LAUNCH", command=on_source_select, bg="#00ffcc", fg="black", font=("Arial", 10, "bold")).pack(pady=15)
+    root.mainloop()
+    root.destroy()
     
     # 1. Pipeline ve Engine Kurulumu
     pipeline = MotionPipeline()
-    smoother = AdaptiveSmoothingFilter(min_alpha=0.4, max_alpha=0.8) # v2.7 Pro
-    stabilizer = MotionStabilizer(lock_threshold=0.003) # v2.7 FootLock
+    drop_compensator = FrameDropCompensator(max_drop_frames=3)
+    smoother = AdaptiveSmoothingFilter(min_alpha=0.4, max_alpha=0.8) # v2.8 Pro
+    stabilizer = MotionStabilizer(lock_threshold=0.003) # v2.8 FootLock
     hierarchy = SkeletonHierarchy()
     
     # Kalibrasyon Verisini Yükle
@@ -34,16 +74,23 @@ def main():
             hierarchy.set_lengths_from_calibration(cal_data)
             engine_logger.info("Context: Loaded latest calibration.")
 
-    # 2. Kamera Kurulumu
+    # 2. Kamera Kurulumu (v2.8 Multi-Source)
     cap = None
-    for idx in [0, 1, 2]:
-        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-        if cap.isOpened():
-            ret, tmp_frame = cap.read()
-            if ret:
-                engine_logger.info(f"Successfully selected camera index {idx}")
-                break
-            cap.release()
+    if source_type == CameraSourceType.MOBILE_WIFI:
+        cap = MobileCameraManager.connect_wifi(source_info)
+    elif source_type == CameraSourceType.MOBILE_USB:
+        cap = MobileCameraManager.connect_usb(preferred_index=1)
+        
+    if cap is None and source_type != CameraSourceType.MOBILE_WIFI:
+        engine_logger.info("Falling back to default USB camera search...")
+        for idx in [0, 1, 2]:
+            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                ret, tmp_frame = cap.read()
+                if ret:
+                    engine_logger.info(f"Successfully selected fallback camera index {idx}")
+                    break
+                cap.release()
     
     if not cap or not cap.isOpened():
         engine_logger.error("No active camera found!")
@@ -57,6 +104,11 @@ def main():
     video_writer = None
     world_log_done = False
 
+    # Pre-compute Gamma Table for Auto-Exposure to save CPU cycles
+    gamma = 1.3
+    invGamma = 1.0 / gamma
+    gamma_table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+
     with mp_holistic.Holistic(
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5,
@@ -67,11 +119,15 @@ def main():
         while cap.isOpened():
             success, image = cap.read()
             if not success: break
+            
+            # [v2.8] Auto-Exposure Compensation
+            avg_brightness = np.mean(image)
+            if 0 < avg_brightness < 50:
+                image = cv2.LUT(image, gamma_table)
 
             # [RESTORED] Dark Screen Diagnostic
-            avg_brightness = np.mean(image)
             if avg_brightness < 10:
-                cv2.putText(image, "CAMERA DISCONNECTED OR COVERED?", (10, 450), 
+                cv2.putText(image, "CAMERA COVERED OR TOO DARK?", (10, 450), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
             image = cv2.resize(image, (640, 480))
@@ -95,9 +151,11 @@ def main():
                     engine_logger.info("WORLD LANDMARKS ACTIVE (v2.7 NEXUS)")
                     world_log_done = True
             
-            # v2.7 Pro Stages
+            # v2.8 Pro Stages
+            frame.joints = drop_compensator.process(frame.joints) # Try to save skipped frames
             frame.joints = smoother.process(frame.joints)
             frame.joints = stabilizer.process(frame.joints)
+            frame.source = source_type
 
             # Visual Feedback
             if results.pose_landmarks:
@@ -117,11 +175,14 @@ def main():
             display_image = cv2.flip(image, 1)
             h, w, _ = display_image.shape
             
-            cv2.putText(display_image, f"v2.7 PRO ACTIVE - {frame.timestamp:.2f}s", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 204), 2)
-
+            # [v2.8] Advanced Debug Overlay
+            cv2.putText(display_image, f"v2.8 PRO | SRC: {source_type.upper()}", (10, 25), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 204), 2)
+            cv2.putText(display_image, f"Time: {frame.timestamp:.2f}s | Confidence: {frame.confidence_avg:.2f}", (10, 50), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            
             if is_recording:
-                cv2.putText(display_image, "● RECORDING", (w-150, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(display_image, "● RECORDING", (w-130, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 if frame.is_valid():
                     recorded_frames.append(frame)
                 if video_writer: video_writer.write(image)

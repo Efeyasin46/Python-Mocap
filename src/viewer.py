@@ -63,6 +63,10 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
         self.bone_meshes = {}  # (start, end) -> GLMeshItem
         self.shadow_mesh = None
         
+        # v2.8 Ghost Trails
+        self.show_ghost = False
+        self.ghost_history = []
+        
         # Timer for 60FPS loop
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.engine_tick)
@@ -138,6 +142,16 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
         self.btn_debug.setCheckable(True)
         self.btn_debug.clicked.connect(self.toggle_debug)
         b_layout.addWidget(self.btn_debug)
+        
+        # v2.8 New Options
+        self.chk_ghost = QtWidgets.QCheckBox("GHOST TRAIL")
+        self.chk_ghost.setChecked(False)
+        self.chk_ghost.clicked.connect(self.toggle_ghost)
+        b_layout.addWidget(self.chk_ghost)
+        
+        self.btn_reset_cam = QtWidgets.QPushButton("RESET CAM")
+        self.btn_reset_cam.clicked.connect(self.reset_camera)
+        b_layout.addWidget(self.btn_reset_cam)
     
         c_layout.addLayout(b_layout)
         self.layout.addWidget(self.controls)
@@ -154,6 +168,7 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
     def setup_viewport(self):
         self.view = gl.GLViewWidget()
         self.view.setBackgroundColor('#050505')
+        self.view.opts['fov'] = 65  # v2.8 Depth Perspective exaggeration
         self.view.setCameraPosition(distance=4, elevation=15, azimuth=-90)
         self.v_layout.addWidget(self.view)
         
@@ -193,6 +208,12 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
 
     def toggle_loop(self):
         self.loop = self.chk_loop.isChecked()
+
+    def toggle_ghost(self):
+        self.show_ghost = self.chk_ghost.isChecked()
+
+    def reset_camera(self):
+        self.view.setCameraPosition(distance=4, elevation=15, azimuth=-90)
 
     def update_speed(self):
         speed_str = self.speed_combo.currentText().replace("x", "")
@@ -278,6 +299,16 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
         offset = -z_min
         for name in points:
             points[name][2] += offset
+            
+        # --- GHOST TRAILS (v2.8) ---
+        if self.show_ghost and self.is_playing:
+            self.ghost_history.append(points)
+            if len(self.ghost_history) > 20: # Keep trail for ~20 frames
+                self.ghost_history.pop(0)
+            self.draw_ghosts()
+        else:
+            self.ghost_history.clear()
+            self.clear_ghosts()
         
         self.draw_meshes(points)
         
@@ -293,6 +324,32 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
             self.draw_velocity_vectors(f1, f2, offset)
             
         self.lbl_frame.setText(f"FRAME: {idx} / {len(self.frames)}")
+
+    def draw_ghosts(self):
+        track_joints = ["LEFT_WRIST", "RIGHT_WRIST", "LEFT_ANKLE", "RIGHT_ANKLE"]
+        for name in track_joints:
+            path = []
+            for pts in self.ghost_history:
+                if name in pts: path.append(pts[name])
+                
+            ghost_id = f"ghost_{name}"
+            if ghost_id not in self.bone_meshes:
+                mesh = gl.GLLinePlotItem(color=(0, 1, 0.8, 0.6), width=2, antialias=True)
+                self.view.addItem(mesh)
+                self.bone_meshes[ghost_id] = {"item": mesh, "thick": 0}
+                
+            if len(path) > 1:
+                self.bone_meshes[ghost_id]["item"].setData(pos=np.array(path))
+                self.bone_meshes[ghost_id]["item"].setVisible(True)
+            else:
+                self.bone_meshes[ghost_id]["item"].setVisible(False)
+                
+    def clear_ghosts(self):
+        track_joints = ["LEFT_WRIST", "RIGHT_WRIST", "LEFT_ANKLE", "RIGHT_ANKLE"]
+        for name in track_joints:
+            ghost_id = f"ghost_{name}"
+            if ghost_id in self.bone_meshes:
+                self.bone_meshes[ghost_id]["item"].setVisible(False)
 
     def draw_debug_points(self, points):
         """Draws small red cubes/points for RAW data comparison."""

@@ -3,7 +3,7 @@ import sys
 import subprocess
 
 def main():
-    print("Starting PyInstaller build for MotionForge v0.1 Alpha...")
+    print("Starting PyInstaller build for MotionForge v2.8 PRO...")
     
     # Try to find mediapipe to include its assets
     try:
@@ -18,7 +18,7 @@ def main():
         
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--name", "MotionForge_v0.1_Alpha",
+        "--name", "MotionForge_v2.8_PRO",
         "--onedir",            # Directory mode is better for large models (MediaPipe)
         "--noconfirm",         # Overwrite existing dist map
         "--clean",
@@ -30,6 +30,7 @@ def main():
         "--hidden-import=numpy",
         "--hidden-import=pyqtgraph",
         "--hidden-import=PyQt5",
+        "--hidden-import=tkinter",
         
         # Internal Nexus Modules (so they get compiled even if conditionally imported)
         "--hidden-import=capture",
@@ -47,7 +48,7 @@ def main():
     
     if result.returncode == 0:
         print("\n[SUCCESS] --- BUILD COMPLETE ---")
-        print("Executable is located in: dist/MotionForge_v0.1_Alpha/MotionForge_v0.1_Alpha.exe")
+        print("Executable is located in: dist/MotionForge_v2.8_PRO/MotionForge_v2.8_PRO.exe")
         print("NOTE: Make sure to run it from a location where 'data' and 'logs' folder can be accessed/created.")
     else:
         print("\n[ERROR] --- BUILD FAILED ---")

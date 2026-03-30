@@ -77,9 +77,14 @@ class AdaptiveSmoothingFilter:
                 # Calculate local velocity
                 vel = np.linalg.norm(curr_pos - self.prev_joints[name])
                 # Adaptive Alpha: Scale between min/max based on velocity
-                # If vel is high, we want more 'current' data (low smoothing)
-                # If vel is low, we want more 'prev' data (high smoothing)
                 alpha = np.clip(1.0 - (vel / self.v_threshold), self.min_alpha, self.max_alpha)
+                
+                # v2.8 Confidence Penalty
+                # If tracking is uncertain, trust history more (prevent glitching)
+                if joint.confidence < 0.6:
+                    penalty = (0.6 - joint.confidence) * 1.5 
+                    alpha = np.clip(alpha + penalty, self.min_alpha, 0.98)
+                    
                 new_pos = alpha * self.prev_joints[name] + (1 - alpha) * curr_pos
             else:
                 new_pos = curr_pos
@@ -147,3 +152,61 @@ class GroundAligner:
             offset = -z_min
             for joint in points.values():
                 joint.z += offset
+
+class FrameDropCompensator:
+    """
+    v2.8 Frame Drop Compensation:
+    Reuses the last valid frame if landmarks are temporarily lost.
+    """
+    def __init__(self, max_drop_frames: int = 5):
+        self.max_drop_frames = max_drop_frames
+        self.last_valid_joints: Dict[str, Joint] = {}
+        self.drop_count = 0
+
+    def process(self, joints: Dict[str, Joint]) -> Dict[str, Joint]:
+        if not joints: # Frame dropped
+            if self.last_valid_joints and self.drop_count < self.max_drop_frames:
+                self.drop_count += 1
+                return self.last_valid_joints
+            return {}
+            
+        # Frame is valid
+        self.drop_count = 0
+        self.last_valid_joints = joints
+        return joints
+
+class OfflinePostProcessor:
+    """
+    v2.8 Deep Stabilization (Non-realtime constraints)
+    Takes entire sequences to fix global tracking errors.
+    """
+    @staticmethod
+    def correct_depth_jitter(frames: List[MocapFrame], window: int = 15) -> List[MocapFrame]:
+        """
+        Dampens Z-axis (forward/back) jitter from the Root (Hips) 
+        without destroying intentional forward movement.
+        """
+        if not frames: return frames
+        
+        z_values = []
+        for f in frames:
+            source = f.world_joints if f.world_joints else f.joints
+            if "LEFT_HIP" in source and "RIGHT_HIP" in source:
+                hip_z = (source["LEFT_HIP"].z + source["RIGHT_HIP"].z) / 2
+                z_values.append(hip_z)
+            else:
+                z_values.append(z_values[-1] if z_values else 0.0)
+                
+        # Moving average over Z axis
+        if len(z_values) > window:
+            import numpy as np
+            z_smoothed = np.convolve(z_values, np.ones(window)/window, mode='same')
+            
+            # Adjust all joints by the smoothed delta
+            for i, f in enumerate(frames):
+                delta_z = z_smoothed[i] - z_values[i]
+                source = f.world_joints if f.world_joints else f.joints
+                for joint in source.values():
+                    joint.z += delta_z
+                    
+        return frames

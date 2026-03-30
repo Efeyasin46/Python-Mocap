@@ -65,8 +65,17 @@ class SkeletonHierarchy:
                 
                 # If we have a target length (from calibration), enforce it
                 if info.length > 0:
-                    vec = (vec / length) * info.length
-                    new_points[name] = parent_pos + vec
+                    # Target strict length vector
+                    target_vec = (vec / length) * info.length
+                    
+                    # v2.8 Blend Factor (0.0 to 1.0)
+                    # If we simply overwrite, jitter becomes snapping.
+                    # We blend slowly if the difference is small, snap if it's huge (prevent tearing)
+                    diff_ratio = abs(length - info.length) / info.length
+                    blend = 0.5 if diff_ratio < 0.2 else 0.9 # Aggressively snap if stretched > 20%
+                    
+                    final_vec = vec * (1 - blend) + target_vec * blend
+                    new_points[name] = parent_pos + final_vec
                     
         return new_points
 

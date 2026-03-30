@@ -11,7 +11,7 @@ from datetime import datetime
 from core.logger import engine_logger
 from core.frame_model import MocapFrame, Joint, UnifiedExporter
 from core.motion_pipeline import MotionPipeline
-from core.constraints import AdaptiveSmoothingFilter, MotionStabilizer, GroundAligner
+from core.constraints import AdaptiveSmoothingFilter, MotionStabilizer, GroundAligner, FrameDropCompensator, OfflinePostProcessor
 from core.skeleton import SkeletonHierarchy
 
 # Global MediaPipe References
@@ -48,8 +48,9 @@ def main():
     
     # 2. Pipeline ve Engine Kurulumu
     pipeline = MotionPipeline()
-    smoother = AdaptiveSmoothingFilter(min_alpha=0.3, max_alpha=0.9) # v2.7 Adaptive
-    stabilizer = MotionStabilizer() # v2.7 FootLock
+    drop_compensator = FrameDropCompensator(max_drop_frames=5) # Bake allows longer interpolation
+    smoother = AdaptiveSmoothingFilter(min_alpha=0.3, max_alpha=0.9) # v2.8 Adaptive
+    stabilizer = MotionStabilizer(lock_threshold=0.005, still_threshold=0.01) # v2.8 Stricter FootLock
     hierarchy = SkeletonHierarchy()
 
     cap = cv2.VideoCapture(input_video)
@@ -84,6 +85,7 @@ def main():
                     m_frame.world_joints[name] = Joint(x=lm.x, y=lm.y, z=lm.z, confidence=lm.visibility)
             
             # Smoothing & Stabilization
+            m_frame.joints = drop_compensator.process(m_frame.joints)
             m_frame.joints = smoother.process(m_frame.joints)
             m_frame.joints = stabilizer.process(m_frame.joints)
 
@@ -95,8 +97,12 @@ def main():
             print(f"\r[ENGINE BAKE] Progress: %{progress:.1f} | Frame: {frame_idx}/{total_frames} ", end="")
 
     cap.release()
+    print("\n")
     
-    # --- POST-PROCESSING ENHANCEMENTS v2.7 ---
+    # --- POST-PROCESSING ENHANCEMENTS v2.8 ---
+    engine_logger.info("Applying Sequence Depth Correction (Anti-Jitter)...")
+    baked_frames = OfflinePostProcessor.correct_depth_jitter(baked_frames)
+    
     engine_logger.info("Applying Floor Detection & Ground Alignment...")
     for frame in baked_frames:
         GroundAligner.align_to_floor(frame)

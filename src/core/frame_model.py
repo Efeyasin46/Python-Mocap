@@ -23,6 +23,8 @@ class MocapFrame:
     joints: Dict[str, Joint] = field(default_factory=dict) # Normalized [0, 1]
     world_joints: Dict[str, Joint] = field(default_factory=dict) # Meters
     bones: List[Bone] = field(default_factory=list)
+    confidence_avg: float = 0.0 # v2.8 Update
+    source: str = "webcam"      # v2.8 Update
     meta: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -43,6 +45,8 @@ class MocapFrame:
             joints=joints,
             world_joints=world_joints,
             bones=bones,
+            confidence_avg=data.get("confidence_avg", 0.0),
+            source=data.get("source", "webcam"),
             meta=data.get("meta", {})
         )
 
@@ -51,6 +55,11 @@ class MocapFrame:
         # Use world_joints if available, else joints
         source = self.world_joints if self.world_joints else self.joints
         if not source: return False
+        
+        # Calculate Average Tracking Confidence [v2.8 Integration]
+        if self.confidence_avg <= 0.0:
+            total_conf = sum(j.confidence for j in source.values())
+            self.confidence_avg = total_conf / len(source)
         
         # 1. Hips check (Critical for Root)
         lh, rh = source.get("LEFT_HIP"), source.get("RIGHT_HIP")
