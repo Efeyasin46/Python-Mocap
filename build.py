@@ -20,6 +20,7 @@ def main():
         sys.executable, "-m", "PyInstaller",
         "--name", "MotionForge_v2.8_PRO",
         "--onedir",            # Directory mode is better for large models (MediaPipe)
+        "--windowed",          # Hide console window
         "--noconfirm",         # Overwrite existing dist map
         "--clean",
         add_data,
