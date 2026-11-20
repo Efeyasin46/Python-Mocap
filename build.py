@@ -18,7 +18,6 @@ PyInstaller.__main__.run([
     "--hidden-import=mediapipe.python.solutions.holistic",
     "--hidden-import=core", "--hidden-import=ui", "--hidden-import=PyQt5.QtOpenGL",
     "--runtime-hook", str(ROOT / "src" / "pyi_rth_mediapipe.py"),
-    "--exclude-module=scipy", "--exclude-module=matplotlib",
     "--exclude-module=pytest", "--exclude-module=jupyter",
     "--add-data", f"{ROOT / 'README.md'}{sep}.",
 ])

@@ -1,11 +1,14 @@
 # MotionForge
 
-**Turn webcam or video footage into motion data you can review and export.**
+**Webcam motion capture for Blender and Unity.**
 
-MotionForge is an open-source desktop motion-capture prototype built with Python, MediaPipe, OpenCV, and PyQt. It provides a live capture studio, a local recording library, offline processing, and export helpers for Blender and Unity.
+MotionForge Studio turns a webcam performance into pose recordings you can review and export. It is an open-source Windows desktop app for creators who want a lightweight starting point for markerless motion capture.
 
-> MotionForge is an active project. Markerless pose tracking depends on camera placement, lighting, clothing, and visibility. Check exported motion before using it in production.
+![MotionForge Studio capture workspace](assets/motionforge-studio-screenshot.png)
 
+[Get the Windows preview](https://github.com/Efeyasin46/Python-Mocap/releases/tag/v0.1.0-alpha.1) · [Report a bug](https://github.com/Efeyasin46/Python-Mocap/issues/new?template=bug_report.yml)
+
+> Preview software: tracking depends on camera placement, lighting, clothing, and visibility. Check motion exports in your target project.
 ## What you can do
 
 - Capture a pose stream from a webcam.
