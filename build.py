@@ -20,4 +20,5 @@ PyInstaller.__main__.run([
     "--runtime-hook", str(ROOT / "src" / "pyi_rth_mediapipe.py"),
     "--exclude-module=pytest", "--exclude-module=jupyter",
     "--add-data", f"{ROOT / 'README.md'}{sep}.",
+    "--add-data", f"{ROOT / 'assets' / 'logos' / 'option-a-icon.svg'}{sep}assets/logos",
 ])

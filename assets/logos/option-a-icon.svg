@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180" fill="none" role="img" aria-labelledby="title">
+  <title id="title">MotionForge Orbit M icon</title>
+  <path d="M18 148V52a17 17 0 0 1 30-11l42 52 42-52a17 17 0 0 1 30 11v96h-32V91l-40 47-40-47v57H18Z" fill="#57D8C4"/>
+  <circle cx="90" cy="108" r="22" fill="#101A2C" stroke="#F5F8FC" stroke-width="8"/>
+  <circle cx="90" cy="108" r="7" fill="#FF9B72"/>
+</svg>

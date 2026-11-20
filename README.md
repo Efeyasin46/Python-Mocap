@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logos/option-a-icon.svg" alt="MotionForge Orbit M logo" width="96"></p>
+
 # MotionForge
 
 **Webcam motion capture for Blender and Unity.**
@@ -6,7 +8,7 @@ MotionForge Studio turns a webcam performance into pose recordings you can revie
 
 ![MotionForge Studio capture workspace](assets/motionforge-studio-screenshot.png)
 
-[Get the Windows preview](https://github.com/Efeyasin46/Python-Mocap/releases/tag/v0.1.0-alpha.2) · [Report a bug](https://github.com/Efeyasin46/Python-Mocap/issues/new?template=bug_report.yml)
+[Get the Windows preview](https://github.com/Efeyasin46/Python-Mocap/releases/tag/v0.1.0-alpha.3) · [Report a bug](https://github.com/Efeyasin46/Python-Mocap/issues/new?template=bug_report.yml)
 
 > Preview software: tracking depends on camera placement, lighting, clothing, and visibility. Check motion exports in your target project.
 ## What you can do
