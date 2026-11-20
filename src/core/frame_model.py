@@ -1,7 +1,9 @@
-import json
+import math
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional
+
 import numpy as np
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any
+
 
 @dataclass
 class Joint:
@@ -9,6 +11,19 @@ class Joint:
     y: float
     z: float
     confidence: float = 0.0
+
+
+def filter_joints_by_confidence(joints: Dict[str, Joint], minimum: float) -> Dict[str, Joint]:
+    """Keep only finite landmarks whose tracker confidence meets the chosen floor."""
+    return {
+        name: joint
+        for name, joint in joints.items()
+        if math.isfinite(joint.x)
+        and math.isfinite(joint.y)
+        and math.isfinite(joint.z)
+        and math.isfinite(joint.confidence)
+        and joint.confidence >= minimum
+    }
 
 @dataclass
 class Bone:
@@ -52,6 +67,8 @@ class MocapFrame:
 
     def is_valid(self) -> bool:
         """Checks if the frame has sufficient and non-corrupt data."""
+        if self.meta.get("capture_mode") == "face":
+            return len(self.joints) >= 100
         # Use world_joints if available, else joints
         source = self.world_joints if self.world_joints else self.joints
         if not source: return False
@@ -83,6 +100,18 @@ class MocapFrame:
         has_world = bool(self.world_joints)
         source = self.world_joints if has_world else self.joints
         if not source or not self.is_valid(): return {}
+
+        if self.meta.get("capture_mode") == "face":
+            values = np.array([[joint.x, joint.y, joint.z] for joint in source.values()])
+            center = values.mean(axis=0)
+            return {
+                name: np.array([
+                    (joint.x - center[0]) * 5.0,
+                    joint.z * 5.0,
+                    -(joint.y - center[1]) * 5.0,
+                ])
+                for name, joint in source.items()
+            }
 
         # 1. HIPS ROOT (Central Pivot)
         lh, rh = source["LEFT_HIP"], source["RIGHT_HIP"]
@@ -133,13 +162,17 @@ class MocapFrame:
 class UnifiedExporter:
     @staticmethod
     def save_recording(frames: List[MocapFrame], filepath: str):
-        data = [f.to_dict() for f in frames]
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4)
+        """Writes a schema-v2 MotionClip JSON (see core/motion_clip.py)."""
+        from core.motion_clip import MotionClip
+        MotionClip.from_frames(frames).save(filepath)
         return filepath
 
     @staticmethod
     def load_recording(filepath: str) -> List[MocapFrame]:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return [MocapFrame.from_dict(f) for f in data]
+        """Reads v2 clips and legacy v1 lists; returns MocapFrame list."""
+        return UnifiedExporter.load_clip(filepath).to_frames()
+
+    @staticmethod
+    def load_clip(filepath: str):
+        from core.motion_clip import MotionClip
+        return MotionClip.load(filepath)

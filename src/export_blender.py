@@ -87,6 +87,32 @@ class BlenderExporter:
             }
         self.report["status"] = "Validated"
 
+    def export_unity(self, output_path: str):
+        """Write a Unity-friendly metric point animation preserving root travel.
+
+        Unity coordinates are X right, Y up, Z forward. MediaPipe world Y points
+        down and Z points forward, so the conversion is (x, -y, -z).
+        """
+        fps = 30.0
+        if len(self.frames) > 1:
+            duration = self.frames[-1].timestamp - self.frames[0].timestamp
+            if duration > 0:
+                fps = (len(self.frames) - 1) / duration
+        rows = []
+        for frame in self.frames:
+            points = frame.world_joints or frame.joints
+            joints = []
+            for name, joint in points.items():
+                values = (joint.x, -joint.y, -joint.z)
+                if all(np.isfinite(values)):
+                    joints.append({"name": name, "position": [float(v) for v in values]})
+            rows.append({"frame": frame.frame_id, "time": frame.timestamp, "joints": joints})
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump({"schema_version": 1, "format": "motionforge-unity-points",
+                       "units": "meters", "fps": fps, "frames": rows}, f)
+        return output_path
+
     def export(self, output_path: str, report_path: str):
         engine_logger.info(f"Exporting to Blender format: {output_path}")
         blender_data = self.normalize_and_validate()
@@ -107,8 +133,11 @@ class BlenderExporter:
             
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(self.report, f, indent=4)
+
+        unity_path = os.path.splitext(output_path)[0] + "_unity.json"
+        self.export_unity(unity_path)
             
-        return output_path, report_path, bvh_path
+        return output_path, report_path, bvh_path, unity_path
 
 def main():
     if len(sys.argv) < 2:
@@ -125,11 +154,12 @@ def main():
     out_json = f"data/{basename}_blender.json"
     out_report = f"data/{basename}_debug_report.json"
     
-    out_json, out_report, out_bvh = exporter.export(out_json, out_report)
+    out_json, out_report, out_bvh, out_unity = exporter.export(out_json, out_report)
     print(f"\n--- BLENDER EXPORT COMPLETE ---")
     print(f"Standard BVH (Import this!): {out_bvh}")
     print(f"Nexus JSON (Custom Bridge): {out_json}")
     print(f"Debug Report: {out_report}")
+    print(f"Unity point animation: {out_unity}")
 
 if __name__ == "__main__":
     main()

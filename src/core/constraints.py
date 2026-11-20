@@ -36,6 +36,8 @@ class SmoothingFilter:
 
     def process(self, joints: Dict[str, Joint]) -> Dict[str, Joint]:
         smoothed = {}
+        for name in self.prev_joints.keys() - joints.keys():
+            self.prev_joints.pop(name, None)
         for name, joint in joints.items():
             curr_pos = np.array([joint.x, joint.y, joint.z])
             
@@ -108,6 +110,11 @@ class MotionStabilizer:
         stabilized = {}
         # Foot Landmarks
         foot_joints = ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL", "LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX"]
+
+        missing = self.prev_joints.keys() - joints.keys()
+        for name in missing:
+            self.prev_joints.pop(name, None)
+            self.pinned_positions.pop(name, None)
         
         for name, joint in joints.items():
             curr_pos = np.array([joint.x, joint.y, joint.z])
@@ -137,21 +144,25 @@ class GroundAligner:
     """
     @staticmethod
     def align_to_floor(frame: MocapFrame):
-        points = frame.world_joints
-        if not points: return
-        
-        # Ground anchors
-        anchors = ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL"]
-        z_min = 100.0
-        
-        for name in anchors:
-            if name in points:
-                if points[name].z < z_min: z_min = points[name].z
-        
-        if z_min < 90.0: # Valid detection
-            offset = -z_min
-            for joint in points.values():
-                joint.z += offset
+        """Legacy single-frame helper; prefer align_clip_to_floor for motion."""
+        GroundAligner.align_clip_to_floor([frame])
+
+    @staticmethod
+    def align_clip_to_floor(frames: List[MocapFrame]):
+        """Apply one constant floor offset using MediaPipe world's Y-upside-down axis.
+
+        MediaPipe world coordinates use +Y downward, so the floor is the
+        largest foot Y value. A constant clip offset preserves jumps.
+        """
+        anchors = ("LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL")
+        foot_y = [f.world_joints[n].y for f in frames for n in anchors
+                  if n in f.world_joints and np.isfinite(f.world_joints[n].y)]
+        if not foot_y:
+            return
+        offset = -max(foot_y)
+        for frame in frames:
+            for joint in frame.world_joints.values():
+                joint.y += offset
 
 class FrameDropCompensator:
     """

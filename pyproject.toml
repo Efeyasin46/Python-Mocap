@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "motionforge"
+version = "0.1.0"
+description = "Markerless motion capture from webcam and video"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "numpy>=1.24,<3",
+  "opencv-python>=4.8,<5",
+  # The current capture implementation uses mp.solutions.holistic.
+  "mediapipe==0.10.21",
+  "PyQt5==5.15.10",
+  "PyQt5-Qt5==5.15.2",
+  "pyqtgraph>=0.13,<1",
+  "PyOpenGL>=3.1,<4",
+  "scipy>=1.10,<2",
+  "platformdirs>=4,<5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pytest-qt>=4.4,<5", "ruff>=0.6,<1", "mypy>=1.10,<2"]
+
+[project.scripts]
+motionforge = "launcher:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["launcher", "capture", "bake", "viewer", "export_blender", "calibrate"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+env = ["QT_QPA_PLATFORM=offscreen"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

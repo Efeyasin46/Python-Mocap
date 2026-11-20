@@ -7,6 +7,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph.opengl as gl
 from core.frame_model import UnifiedExporter, MocapFrame, Joint
 from core.skeleton import SkeletonHierarchy
+from core.playback import PlaybackTimeline
 from core.logger import engine_logger
 
 class MeshUtils:
@@ -63,6 +64,7 @@ class NexusViewport(gl.GLViewWidget):
         self.joint_meshes = {}
         self.bone_meshes = {}
         self.shadow_mesh = None
+        self.face_graph_item = None
         self.sphere_data = gl.MeshData.sphere(rows=10, cols=10)
         self.cylinder_data = gl.MeshData.cylinder(rows=10, cols=10)
         
@@ -85,15 +87,38 @@ class NexusViewport(gl.GLViewWidget):
         if self.shadow_mesh: 
             try: self.removeItem(self.shadow_mesh)
             except: pass
+        if self.face_graph_item:
+            try: self.removeItem(self.face_graph_item)
+            except: pass
         self.joint_meshes = {}
         self.bone_meshes = {}
         self.shadow_mesh = None
+        self.face_graph_item = None
 
     def render_frame(self, frame, offset_z=True):
         """Main entry point for rendering a single MocapFrame."""
         if not frame: return
         points = frame.get_world_coords()
-        
+
+        if frame.meta.get("capture_mode") == "face":
+            for mesh in self.joint_meshes.values():
+                mesh.setVisible(False)
+            for bone in self.bone_meshes.values():
+                bone["item"].setVisible(False)
+            if self.shadow_mesh:
+                self.shadow_mesh.setVisible(False)
+            self.draw_face_mesh(points)
+            return
+
+        if self.face_graph_item:
+            self.face_graph_item.setVisible(False)
+        for mesh in self.joint_meshes.values():
+            mesh.setVisible(True)
+        for bone in self.bone_meshes.values():
+            bone["item"].setVisible(True)
+        if self.shadow_mesh:
+            self.shadow_mesh.setVisible(True)
+
         # Enforce Hierarchy
         if not self.debug_mode:
             points = self.hierarchy.enforce_lengths(points)
@@ -116,6 +141,33 @@ class NexusViewport(gl.GLViewWidget):
             self.clear_ghosts()
         
         self.draw_meshes(points)
+
+    def draw_face_mesh(self, points):
+        import mediapipe as mp
+
+        names = sorted(points, key=lambda name: int(name.removeprefix("FACE_")))
+        if not names:
+            return
+        positions = np.array([points[name] for name in names], dtype=np.float32)
+        edges = np.array(list(mp.solutions.face_mesh.FACEMESH_TESSELATION), dtype=np.int32)
+        edges = edges[(edges < len(positions)).all(axis=1)]
+        if self.face_graph_item is None:
+            self.face_graph_item = gl.GLGraphItem(
+                pos=positions,
+                adj=edges,
+                size=3,
+                color=(0.36, 0.88, 0.77, 0.9),
+                edgeColor=(0.25, 0.72, 0.68, 0.55),
+                pxMode=True,
+            )
+            self.addItem(self.face_graph_item)
+        else:
+            self.face_graph_item.setData(
+                pos=positions, adj=edges, size=3,
+                color=(0.36, 0.88, 0.77, 0.9),
+                edgeColor=(0.25, 0.72, 0.68, 0.55), pxMode=True,
+            )
+            self.face_graph_item.setVisible(True)
 
     def draw_meshes(self, points):
         import mediapipe as mp
@@ -213,10 +265,14 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
         self.layout = QtWidgets.QVBoxLayout(self.central)
         self.layout.setContentsMargins(0,0,0,0)
         self.viewport = NexusViewport()
+        # Keep keyboard focus on the window so playback shortcuts are not swallowed by the GL widget.
+        self.viewport.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.viewport)
         self.frames = []
-        self.current_time = 0.0
-        self.is_playing = True
+        self.timeline = PlaybackTimeline([])
+        self._last_idx = None
+        self._title = "MotionForge Nexus - Viewport Standalone"
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.tick)
         self.last_tick = time.time()
@@ -225,23 +281,52 @@ class MocapViewerAAA(QtWidgets.QMainWindow):
 
     def load_file(self, path):
         try:
-            self.frames = UnifiedExporter.load_recording(path)
-            if self.frames: self.total_duration = self.frames[-1].timestamp
+            frames = UnifiedExporter.load_recording(path)
         except Exception as e:
             engine_logger.error(f"Viewer Error: {e}")
+            return
+        self.frames = frames
+        self.timeline = PlaybackTimeline([f.timestamp for f in frames])
+        self._title = f"MotionForge Nexus - {os.path.basename(path)}"
+        self._last_idx = None
+        self.viewport.clear_ghosts()
 
     def tick(self):
         now = time.time()
         dt = now - self.last_tick
         self.last_tick = now
-        if self.is_playing and self.frames:
-            self.current_time += dt
-            if self.current_time > self.total_duration: self.current_time = 0.0
-            idx = 0
-            for i in range(len(self.frames)-1):
-                if self.frames[i].timestamp <= self.current_time <= self.frames[i+1].timestamp:
-                    idx = i; break
+        if not self.frames:
+            return
+        idx = self.timeline.advance(dt)
+        if idx != self._last_idx:          # render only when the frame changes
+            self._last_idx = idx
             self.viewport.render_frame(self.frames[idx])
+        self._update_title()
+
+    def _update_title(self):
+        tl = self.timeline
+        state = "playing" if tl.playing else "paused"
+        direction = "<" if tl.reverse else ">"
+        self.setWindowTitle(
+            f"{self._title} | {tl.index + 1}/{tl.n_frames} | {tl.time:.2f}/{tl.duration:.2f}s | "
+            f"{direction}{tl.speed:g}x {state}{' loop' if tl.loop else ''}"
+            f" | Space play  \u2190/\u2192 step  [ ] speed  R reverse  L loop  Home/End")
+
+    def keyPressEvent(self, event):
+        tl, key, K = self.timeline, event.key(), QtCore.Qt
+        if key == K.Key_Space: tl.toggle()
+        elif key == K.Key_Left: tl.step(-1)
+        elif key == K.Key_Right: tl.step(1)
+        elif key == K.Key_BracketLeft: tl.set_speed(tl.speed / 2)
+        elif key == K.Key_BracketRight: tl.set_speed(tl.speed * 2)
+        elif key == K.Key_R: tl.reverse = not tl.reverse
+        elif key == K.Key_L: tl.loop = not tl.loop
+        elif key == K.Key_Home: tl.seek_frame(0)
+        elif key == K.Key_End: tl.seek_frame(tl.n_frames - 1)
+        else:
+            return super().keyPressEvent(event)
+        self._last_idx = None              # force a redraw after any user seek
+        self._update_title()
 
 def main():
     app = QtWidgets.QApplication(sys.argv)

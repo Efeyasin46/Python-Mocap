@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible problem in MotionForge
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Please do not attach identifiable recordings unless everyone shown has agreed to share them."
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Include the screen or workflow where you saw the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Open Studio...\n2. Choose...\n3. Click..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Input source
+      options: [Webcam, Mobile camera, MP4 or video, MotionForge JSON, Other]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: MotionForge version or commit
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Windows and Python versions
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Remove private paths and personal information before sharing.

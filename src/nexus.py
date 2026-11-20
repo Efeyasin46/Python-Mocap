@@ -1,182 +1,744 @@
-import sys
+"""MotionForge desktop studio: capture, review, processing, and export."""
 import os
-import time
+import sys
+from datetime import datetime
+
+# Windows no longer searches a Python extension's folder for dependent DLLs
+# automatically. MediaPipe ships OpenCV/native dependencies alongside this
+# directory, so keep its DLL-directory handle alive before importing capture.
+_DLL_DIRECTORY_HANDLES = []
+if os.name == "nt" and hasattr(os, "add_dll_directory"):
+    for search_root in sys.path:
+        mediapipe_dll_dir = os.path.join(search_root, "mediapipe", "python")
+        if os.path.isdir(mediapipe_dll_dir):
+            _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(mediapipe_dll_dir))
+
+# Load MediaPipe's native bindings before Qt loads its own bundled DLLs. On
+# some Windows installations the two DLL search contexts otherwise conflict.
+import mediapipe as _mediapipe  # noqa: E402
+
+import cv2
 from PyQt5 import QtCore, QtGui, QtWidgets
-from ui.style import NexusStyle
-from ui.components import ControlPanelWidget, ReferenceCameraWidget, NexusTimelineWidget
-from viewer import NexusViewport
-from capture import CaptureThread
+
 from bake import BakeThread
-from core.mobile_camera import CameraSourceType
+from capture import CaptureThread
+from core.frame_model import UnifiedExporter
 from core.logger import engine_logger
+from core.mobile_camera import CameraSourceType
+from export_blender import BlenderExporter
+from ui.style import NexusStyle
+from viewer import NexusViewport
+
 
 class MotionForgeNexus(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MOTIONFORGE NEXUS v3.0 - PROFESSIONAL MOCAP STUDIO")
-        self.resize(1600, 900)
+        self.setWindowTitle("MotionForge | Hareket Yakalama Stüdyosu")
+        self.resize(1440, 900)
+        self.setMinimumSize(980, 640)
         self.setStyleSheet(NexusStyle.QSS)
-        
-        # Engine Threads
         self.capture_thread = None
         self.bake_thread = None
-        
-        self.init_ui()
-        self.setup_connections()
-        
-        engine_logger.info("Nexus v3.0 Core Initialized")
+        self.countdown_remaining = 0
+        self.review_frames = []
+        self.review_index = 0
+        self.play_timer = QtCore.QTimer(self)
+        self.play_timer.setInterval(33)
+        self.play_timer.timeout.connect(self.advance_review)
+        self.record_countdown_timer = QtCore.QTimer(self)
+        self.record_countdown_timer.setInterval(1000)
+        self.record_countdown_timer.timeout.connect(self.advance_recording_countdown)
+        self._build_shell()
+        self.refresh_library()
+        engine_logger.info("MotionForge Studio initialized")
 
-    def init_ui(self):
-        self.central = QtWidgets.QWidget()
-        self.setCentralWidget(self.central)
-        self.main_layout = QtWidgets.QHBoxLayout(self.central)
-        self.main_layout.setContentsMargins(0,0,0,0)
-        self.main_layout.setSpacing(0)
-        
-        # --- LEFT PANEL (CONTROLS) ---
-        self.left_panel = ControlPanelWidget("Controls")
-        self.main_layout.addWidget(self.left_panel)
-        
-        self.left_panel.add_section("Source Selection")
+    def _build_shell(self):
+        root = QtWidgets.QWidget()
+        self.setCentralWidget(root)
+        layout = QtWidgets.QHBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        nav = QtWidgets.QFrame()
+        nav.setObjectName("NavigationRail")
+        nav.setFixedWidth(184)
+        nav_layout = QtWidgets.QVBoxLayout(nav)
+        nav_layout.setContentsMargins(16, 22, 16, 18)
+        nav_layout.setSpacing(8)
+        brand = QtWidgets.QLabel("MOTION\nFORGE")
+        brand.setObjectName("Brand")
+        nav_layout.addWidget(brand)
+        subtitle = QtWidgets.QLabel("MOCAP WORKSPACE")
+        subtitle.setObjectName("Muted")
+        nav_layout.addWidget(subtitle)
+        nav_layout.addSpacing(30)
+
+        self.pages = QtWidgets.QStackedWidget()
+        self.nav_buttons = []
+        for index, (label, builder) in enumerate([
+            ("01  Kayıt stüdyosu", self._build_studio),
+            ("02  Kayıtlarım", self._build_library),
+            ("03  Dışa aktar", self._build_export),
+        ]):
+            button = QtWidgets.QPushButton(label)
+            button.setObjectName("NavButton")
+            button.setCheckable(True)
+            button.clicked.connect(lambda checked=False, i=index: self.open_page(i))
+            nav_layout.addWidget(button)
+            self.nav_buttons.append(button)
+            self.pages.addWidget(builder())
+        nav_layout.addStretch()
+        version = QtWidgets.QLabel("MOTIONFORGE  •  LOCAL")
+        version.setObjectName("Muted")
+        nav_layout.addWidget(version)
+        layout.addWidget(nav)
+        layout.addWidget(self.pages, 1)
+        self.open_page(0)
+
+        self.statusBar().showMessage("Hazır  •  Kamerayı bağla veya kayıtlarını aç")
+
+    def _page(self, title, description):
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(26, 22, 26, 24)
+        outer.setSpacing(18)
+        header = QtWidgets.QHBoxLayout()
+        texts = QtWidgets.QVBoxLayout()
+        heading = QtWidgets.QLabel(title)
+        heading.setObjectName("PageTitle")
+        detail = QtWidgets.QLabel(description)
+        detail.setObjectName("Muted")
+        texts.addWidget(heading)
+        texts.addWidget(detail)
+        header.addLayout(texts)
+        header.addStretch()
+        outer.addLayout(header)
+        return page, outer
+
+    def _build_studio(self):
+        page, outer = self._page("Kayıt stüdyosu", "Takip modunu seç, kadrajı ayarla ve çekimini kaydet")
+
+        source_bar = self._card("SETUP")
+        setup = QtWidgets.QHBoxLayout(source_bar)
+        setup.setContentsMargins(18, 14, 18, 14)
+        setup.setSpacing(12)
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItems(["Webcam (Standard)", "Mobile (USB/Virtual)", "Mobile (WiFi/IP)"])
-        self.left_panel.add_widget(self.source_combo)
-        
-        self.ip_input = QtWidgets.QLineEdit("192.168.1.55:8080")
-        self.ip_input.setPlaceholderText("IP:Port for WiFi")
-        self.ip_input.setVisible(False)
-        self.left_panel.add_widget(self.ip_input)
-        self.source_combo.currentIndexChanged.connect(lambda i: self.ip_input.setVisible(i == 2))
-        
-        self.btn_connect = QtWidgets.QPushButton("⚡ CONNECT ENGINE")
-        self.btn_connect.setObjectName("PrimaryBtn")
+        self.source_combo.addItems([
+            "Webcam",
+            "Mobil • USB (yakında)",
+            "Mobil • Wi-Fi (yakında)",
+        ])
+        source_model = self.source_combo.model()
+        for source_index in (1, 2):
+            item = source_model.item(source_index)
+            item.setEnabled(False)
+            item.setToolTip("Bu sürümde kullanılamıyor; sonraki sürümler için planlandı.")
+        self.source_combo.setMinimumWidth(180)
+        setup.addWidget(self._label("KAMERA"))
+        setup.addWidget(self.source_combo)
+        self.capture_mode_combo = QtWidgets.QComboBox()
+        self.capture_mode_combo.addItems(["Tam vücut", "Yüz ağı"])
+        self.capture_mode_combo.setMinimumWidth(150)
+        self.capture_mode_combo.setToolTip(
+            "Tam vücut pozu veya yalnızca yüz işaret noktalarını takip et"
+        )
+        setup.addSpacing(12)
+        setup.addWidget(self._label("TAKİP MODU"))
+        setup.addWidget(self.capture_mode_combo)
+        setup.addStretch(1)
+        self.btn_connect = QtWidgets.QPushButton("Kamerayı bağla")
+        self.btn_connect.setObjectName("PrimaryButton")
         self.btn_connect.clicked.connect(self.toggle_engine)
-        self.left_panel.add_widget(self.btn_connect)
-        
-        self.left_panel.add_section("Recording")
-        self.btn_record = QtWidgets.QPushButton("● START RECORDING")
-        self.btn_record.setObjectName("RecordBtn")
+        setup.addWidget(self.btn_connect)
+        outer.addWidget(source_bar)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(14)
+        viewport_card = self._card("KAMERA ÖNİZLEMESİ")
+        viewport_layout = QtWidgets.QVBoxLayout(viewport_card)
+        viewport_layout.setContentsMargins(12, 12, 12, 12)
+        self.reference_preview = QtWidgets.QLabel("KAMERA GÖRÜNTÜSÜ\nKamerayı bağla")
+        self.reference_preview.setObjectName("CameraPreview")
+        self.reference_preview.setAlignment(QtCore.Qt.AlignCenter)
+        self.reference_preview.setMinimumSize(250, 180)
+        self.reference_preview.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        viewport_layout.addWidget(self.reference_preview, 1)
+        self.status_label = QtWidgets.QLabel("KAMERA BAĞLI DEĞİL")
+        self.status_label.setObjectName("LiveStatus")
+        viewport_layout.addWidget(self.status_label)
+        body.addWidget(viewport_card, 1)
+
+        self.viewport = NexusViewport()
+        self.viewport.setMinimumWidth(340)
+        stage_card = self._card("CANLI 3D SAHNE")
+        stage_layout = QtWidgets.QVBoxLayout(stage_card)
+        stage_layout.setContentsMargins(12, 12, 12, 12)
+        stage_layout.addWidget(self.viewport, 1)
+        body.addWidget(stage_card, 1)
+
+        inspector = self._card("ÇEKİM AYARLARI")
+        inspector.setMinimumWidth(205)
+        inspector.setMaximumWidth(250)
+        controls = QtWidgets.QVBoxLayout(inspector)
+        controls.setContentsMargins(18, 18, 18, 18)
+        controls.setSpacing(12)
+        controls.addWidget(self._label("KAYIT ÖNCESİ GERİ SAYIM"))
+        self.record_delay = QtWidgets.QSpinBox()
+        self.record_delay.setRange(0, 30)
+        self.record_delay.setValue(0)
+        self.record_delay.setSuffix(" sn")
+        self.record_delay.setToolTip("Kayıt başlamadan önce bekleyecek süre")
+        controls.addWidget(self.record_delay)
+        self.btn_record = QtWidgets.QPushButton("Kaydı başlat")
+        self.btn_record.setObjectName("RecordButton")
         self.btn_record.setEnabled(False)
         self.btn_record.clicked.connect(self.toggle_recording)
-        self.left_panel.add_widget(self.btn_record)
-        
-        self.left_panel.add_section("Bake Offline")
-        self.btn_bake = QtWidgets.QPushButton("🤖 BAKE VIDEO FILE")
+        self.btn_record.setMinimumHeight(48)
+        controls.addWidget(self.btn_record)
+        self.capture_hint = QtWidgets.QLabel("Başlamak için web kameranı bağla. Kayıt sonunda adını ve konumunu seçebilirsin.")
+        self.capture_hint.setObjectName("Muted")
+        self.capture_hint.setWordWrap(True)
+        controls.addWidget(self.capture_hint)
+        divider = QtWidgets.QFrame()
+        divider.setObjectName("Divider")
+        divider.setFrameShape(QtWidgets.QFrame.HLine)
+        controls.addWidget(divider)
+        controls.addWidget(self._label("MEVCUT DOSYAYI İŞLE"))
+        self.btn_bake = QtWidgets.QPushButton("Video / JSON işle…")
         self.btn_bake.clicked.connect(self.run_bake)
-        self.left_panel.add_widget(self.btn_bake)
-
-        # --- CENTER AREA (3D VIEWPORT) ---
-        center_container = QtWidgets.QVBoxLayout()
-        self.main_layout.addLayout(center_container, 1) # Content expands
-        
-        self.header = QtWidgets.QFrame()
-        self.header.setFixedHeight(60)
-        self.header.setStyleSheet("border-bottom: 2px solid #1a212b;")
-        h_layout = QtWidgets.QHBoxLayout(self.header)
-        title_top = QtWidgets.QLabel("MOTIONFORGE NEXUS v3.0")
-        title_top.setObjectName("Title")
-        h_layout.addWidget(title_top)
-        h_layout.addStretch()
-        self.status_lbl = QtWidgets.QLabel("SYS: READY")
-        self.status_lbl.setStyleSheet("color: #8b949e; font-weight: bold;")
-        h_layout.addWidget(self.status_lbl)
-        center_container.addWidget(self.header)
-        
-        self.viewport = NexusViewport()
-        center_container.addWidget(self.viewport, 1)
-        
-        # Floating Reference Camera
-        self.ref_cam = ReferenceCameraWidget(self.viewport)
-        self.ref_cam.move(20, 20)
-        
-        # Timeline
-        self.timeline = NexusTimelineWidget()
-        center_container.addWidget(self.timeline)
-
-        # --- RIGHT PANEL (SETTINGS) ---
-        self.right_panel = ControlPanelWidget("Settings")
-        self.main_layout.addWidget(self.right_panel)
-        
-        self.right_panel.add_section("AI Tracking")
-        self.right_panel.add_widget(QtWidgets.QLabel("Confidence Threshold"))
+        controls.addWidget(self.btn_bake)
+        self.bake_progress = QtWidgets.QProgressBar()
+        self.bake_progress.setRange(0, 100)
+        self.bake_progress.setVisible(False)
+        controls.addWidget(self.bake_progress)
+        controls.addSpacing(12)
+        controls.addWidget(self._label("TAKİP HASSASİYETİ"))
         self.conf_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.conf_slider.setRange(20, 90)
-        self.conf_slider.setValue(50)
-        self.right_panel.add_widget(self.conf_slider)
-        
-        self.chk_ghost = QtWidgets.QCheckBox("Show Ghost Trails")
-        self.chk_ghost.toggled.connect(lambda v: setattr(self.viewport, 'show_ghost', v))
-        self.right_panel.add_widget(self.chk_ghost)
-        
-        self.btn_reset_cam = QtWidgets.QPushButton("Reset View")
-        self.btn_reset_cam.clicked.connect(self.viewport.reset_view)
-        self.right_panel.add_widget(self.btn_reset_cam)
-        
-    def setup_connections(self):
-        pass
+        self.conf_slider.setRange(30, 90)
+        self.conf_slider.setValue(65)
+        self.conf_slider.setToolTip(
+            "Landmarks below this confidence are left out of the preview and recording"
+        )
+        controls.addWidget(self.conf_slider)
+        confidence_row = QtWidgets.QHBoxLayout()
+        confidence_row.addWidget(QtWidgets.QLabel("Zayıf noktaları gizle"))
+        confidence_row.addStretch()
+        self.conf_value = QtWidgets.QLabel("65%")
+        self.conf_value.setObjectName("MetricValue")
+        confidence_row.addWidget(self.conf_value)
+        controls.addLayout(confidence_row)
+        self.conf_slider.valueChanged.connect(self.on_confidence_changed)
+        self.chk_ghost = QtWidgets.QCheckBox("Hareket izlerini göster")
+        self.chk_ghost.toggled.connect(lambda v: setattr(self.viewport, "show_ghost", v))
+        controls.addWidget(self.chk_ghost)
+        reset = QtWidgets.QPushButton("Görünümü sıfırla")
+        reset.clicked.connect(self.viewport.reset_view)
+        controls.addWidget(reset)
+        controls.addStretch(1)
+        body.addWidget(inspector)
+        outer.addLayout(body, 1)
+        return page
+
+    def _build_library(self):
+        page, outer = self._page("Kayıt arşivi", "Çekimlerini gözden geçir, oynat ve dışa aktarmaya hazırla")
+        toolbar = QtWidgets.QHBoxLayout()
+        self.library_count = QtWidgets.QLabel("0 kayıt")
+        self.library_count.setObjectName("MetricValue")
+        toolbar.addWidget(self.library_count)
+        toolbar.addSpacing(18)
+        self.library_search = QtWidgets.QLineEdit()
+        self.library_search.setPlaceholderText("Kayıtlarda ara…")
+        self.library_search.setMaximumWidth(300)
+        self.library_search.textChanged.connect(self.filter_library)
+        toolbar.addWidget(self.library_search)
+        toolbar.addStretch()
+        refresh = QtWidgets.QPushButton("Yenile")
+        refresh.clicked.connect(self.refresh_library)
+        toolbar.addWidget(refresh)
+        outer.addLayout(toolbar)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(16)
+        list_card = self._card("ÇEKİMLER")
+        list_layout = QtWidgets.QVBoxLayout(list_card)
+        list_layout.setContentsMargins(14, 14, 14, 14)
+        self.library_table = QtWidgets.QTableWidget(0, 3)
+        self.library_table.setHorizontalHeaderLabels(["Kayıt adı", "Kare", "Süre"])
+        self.library_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.library_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.library_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.library_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.library_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.library_table.setAlternatingRowColors(True)
+        self.library_table.verticalHeader().hide()
+        self.library_table.setShowGrid(False)
+        self.library_table.setMinimumWidth(360)
+        self.library_table.itemSelectionChanged.connect(self.select_library_take)
+        list_layout.addWidget(self.library_table)
+        self.library_empty = QtWidgets.QLabel("Henüz burada kayıt yok. Stüdyo ekranında kayıt al veya JSON dosyası aç.")
+        self.library_empty.setObjectName("EmptyState")
+        self.library_empty.setWordWrap(True)
+        list_layout.addWidget(self.library_empty)
+        buttons = QtWidgets.QHBoxLayout()
+        open_button = QtWidgets.QPushButton("JSON aç…")
+        open_button.clicked.connect(self.open_json)
+        buttons.addWidget(open_button)
+        self.review_play = QtWidgets.QPushButton("Oynat")
+        self.review_play.clicked.connect(self.toggle_review)
+        buttons.addWidget(self.review_play)
+        list_layout.addLayout(buttons)
+        body.addWidget(list_card, 1)
+
+        preview = self._card("ÖNİZLEME")
+        preview_layout = QtWidgets.QVBoxLayout(preview)
+        self.library_viewport = NexusViewport()
+        preview_layout.addWidget(self.library_viewport, 1)
+        self.review_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.review_slider.setRange(0, 0)
+        self.review_slider.valueChanged.connect(self.scrub_review)
+        preview_layout.addWidget(self.review_slider)
+        self.review_info = QtWidgets.QLabel("Önizlemek için bir kayıt seç")
+        self.review_info.setObjectName("Muted")
+        preview_layout.addWidget(self.review_info)
+        body.addWidget(preview, 1)
+        outer.addLayout(body, 1)
+        self.recording_paths = []
+        return page
+
+    def _build_export(self):
+        page, outer = self._page("Dışa aktar", "Kayıtlarını Blender veya Unity için dosyaya dönüştür")
+        card = self._card("DIŞA AKTARIM AKIŞI")
+        form = QtWidgets.QGridLayout(card)
+        form.setContentsMargins(24, 24, 24, 24)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(16)
+        form.addWidget(self._label("KAYNAK KAYIT"), 0, 0)
+        self.export_source = QtWidgets.QLineEdit()
+        self.export_source.setPlaceholderText("Arşivden seç veya bir JSON kaydı aç")
+        form.addWidget(self.export_source, 0, 1)
+        browse = QtWidgets.QPushButton("Gözat…")
+        browse.clicked.connect(self.choose_export_source)
+        form.addWidget(browse, 0, 2)
+        form.addWidget(self._label("HEDEF FORMAT"), 1, 0)
+        self.export_target = QtWidgets.QComboBox()
+        self.export_target.addItems(["Blender • BVH + JSON + Unity JSON", "Unity • nokta animasyonu JSON"])
+        form.addWidget(self.export_target, 1, 1, 1, 2)
+        form.addWidget(self._label("DOSYA ADI VE KONUMU"), 2, 0)
+        self.export_path = QtWidgets.QLineEdit()
+        self.export_path.setPlaceholderText("Dosya adını ve kaydedilecek klasörü seç")
+        form.addWidget(self.export_path, 2, 1)
+        choose_file = QtWidgets.QPushButton("Dosya seç…")
+        choose_file.clicked.connect(self.choose_export_path)
+        form.addWidget(choose_file, 2, 2)
+        self.export_button = QtWidgets.QPushButton("Dışa aktar")
+        self.export_button.setObjectName("PrimaryButton")
+        self.export_button.clicked.connect(self.run_export)
+        form.addWidget(self.export_button, 3, 1)
+        self.export_result = QtWidgets.QLabel("Önce bir kaynak kayıt seç. Blender hedefi birden fazla ilişkili dosya oluşturur.")
+        self.export_result.setObjectName("Muted")
+        self.export_result.setWordWrap(True)
+        form.addWidget(self.export_result, 4, 1, 1, 2)
+        outer.addWidget(card)
+        outer.addStretch()
+        return page
+
+    def _card(self, title):
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("Card")
+        frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        frame.setProperty("cardTitle", title)
+        return frame
+
+    @staticmethod
+    def _label(text):
+        label = QtWidgets.QLabel(text)
+        label.setObjectName("FieldLabel")
+        return label
+
+    def open_page(self, index):
+        self.pages.setCurrentIndex(index)
+        for i, button in enumerate(self.nav_buttons):
+            button.setChecked(i == index)
+        if index == 1:
+            self.refresh_library()
 
     def toggle_engine(self):
         if self.capture_thread and self.capture_thread.isRunning():
             self.stop_engine()
-        else:
-            self.start_engine()
-
-    def start_engine(self):
-        idx = self.source_combo.currentIndex()
-        stype = CameraSourceType.WEBCAM
-        sinfo = 0
-        if idx == 1: stype = CameraSourceType.MOBILE_USB; sinfo = 1
-        if idx == 2: stype = CameraSourceType.MOBILE_WIFI; sinfo = self.ip_input.text()
-        
-        self.capture_thread = CaptureThread(stype, sinfo)
+            return
+        source_type, source_info = CameraSourceType.WEBCAM, 0
+        self.capture_thread = CaptureThread(
+            source_type,
+            source_info,
+            min_confidence=self.conf_slider.value() / 100.0,
+            capture_mode="face" if self.capture_mode_combo.currentIndex() == 1 else "full_body",
+        )
         self.capture_thread.frame_ready.connect(self.viewport.render_frame)
-        self.capture_thread.image_ready.connect(self.ref_cam.update_image)
-        self.capture_thread.status_msg.connect(self.status_lbl.setText)
-        
+        self.capture_thread.image_ready.connect(self.on_reference_image)
+        self.capture_thread.status_msg.connect(self.on_capture_status)
         self.capture_thread.start()
-        self.btn_connect.setText("⏹ STOP ENGINE")
+        self.btn_connect.setText("Bağlantıyı kes")
         self.btn_record.setEnabled(True)
-        self.status_lbl.setText("SYS: ENGINE ACTIVE")
+        self.status_label.setText("BAĞLANIYOR")
+
+    def on_reference_image(self, image):
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        height, width, channels = image.shape
+        rgb = QtGui.QImage(image.data, width, height, channels * width, QtGui.QImage.Format_RGB888).copy()
+        self.reference_preview.setPixmap(QtGui.QPixmap.fromImage(rgb).scaled(
+            self.reference_preview.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+
+    def on_capture_status(self, text):
+        self.status_label.setText(text.upper())
+        self.statusBar().showMessage(text)
+        if text.startswith("ERROR:"):
+            self.cancel_recording_countdown(show_message=False)
+            self.btn_connect.setText("Kamerayı bağla")
+            self.btn_record.setEnabled(False)
+            self.status_label.setText("KAMERA AÇILAMADI")
+            self.capture_hint.setText(self.camera_error_details(text))
+            self.notify_error(
+                "Kamera kullanılamıyor" if "camera" in text.lower() else "Yakalama hatası",
+                self.camera_error_details(text),
+            )
+        if "SAVED:" in text:
+            self.record_delay.setEnabled(True)
+            self.btn_record.setText("Kaydı başlat")
+            self.status_label.setText("KAYIT KAYDEDİLDİ")
+            self.statusBar().showMessage(f"Kayıt kaydedildi: {text.split('SAVED:', 1)[1].strip()}", 8000)
+            self.btn_record.setProperty("recording", False)
+            self.btn_record.style().unpolish(self.btn_record)
+            self.btn_record.style().polish(self.btn_record)
+            self.refresh_library()
 
     def stop_engine(self):
+        self.cancel_recording_countdown(show_message=False)
         if self.capture_thread:
             self.capture_thread.stop()
             self.capture_thread = None
-        self.btn_connect.setText("⚡ CONNECT ENGINE")
+        self.btn_connect.setText("Kamerayı bağla")
         self.btn_record.setEnabled(False)
-        self.status_lbl.setText("SYS: READY")
+        self.status_label.setText("HAZIR")
 
     def toggle_recording(self):
-        if self.capture_thread:
-            self.capture_thread.toggle_recording()
-            is_rec = self.capture_thread.is_recording
-            self.btn_record.setText("⏹ STOP RECORDING" if is_rec else "● START RECORDING")
-            self.btn_record.setStyleSheet("color: white; background: #ff5555;" if is_rec else "")
-            
-    def run_bake(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select Video", "data", "Videos (*.mp4)")
-        if path:
-            self.stop_engine()
-            self.bake_thread = BakeThread(path)
-            self.bake_thread.progress.connect(self.timeline.progress_bar.setValue)
-            self.bake_thread.status.connect(self.status_lbl.setText)
-            self.bake_thread.finished.connect(self.on_bake_finished)
-            
-            self.timeline.progress_bar.setVisible(True)
-            self.bake_thread.start()
+        if not self.capture_thread:
+            return
+        if self.record_countdown_timer.isActive():
+            self.cancel_recording_countdown()
+            return
+        if self.capture_thread.is_recording:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            suggested_name = os.path.abspath(
+                os.path.join("data", f"MotionForge_{timestamp}.json")
+            )
+            output_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Hareket kaydını kaydet",
+                suggested_name,
+                "MotionForge kaydı (*.json)",
+            )
+            if not output_path:
+                self.statusBar().showMessage("Kaydetme iptal edildi; kayıt devam ediyor", 5000)
+                return
+            if not output_path.lower().endswith(".json"):
+                output_path += ".json"
+            try:
+                self.capture_thread.stop_recording(output_path)
+            except Exception as exc:
+                QtWidgets.QMessageBox.critical(self, "Kayıt kaydedilemedi", str(exc))
+                return
+            self.record_delay.setEnabled(True)
+            self.btn_record.setText("Kaydı başlat")
+            self.btn_record.setProperty("recording", False)
+            self.btn_record.style().unpolish(self.btn_record)
+            self.btn_record.style().polish(self.btn_record)
+            self.status_label.setText("KAYDEDİLİYOR")
+            return
 
-    def on_bake_finished(self, out_path):
-        self.timeline.progress_bar.setVisible(False)
-        QtWidgets.QMessageBox.information(self, "Bake Complete", f"Saved to:\n{out_path}")
+        delay = self.record_delay.value()
+        if delay <= 0:
+            self.start_recording_now()
+            return
+        self.countdown_remaining = delay
+        self.record_delay.setEnabled(False)
+        self.btn_record.setText("Geri sayımı iptal et")
+        self.status_label.setText(f"{delay} SN SONRA BAŞLIYOR")
+        self.statusBar().showMessage(
+            f"Kayıt {delay} saniye içinde başlayacak. İptal etmek için düğmeye bas."
+        )
+        self.capture_hint.setText("Kadrajda yerini al; geri sayım bitince kayıt başlayacak.")
+        self.record_countdown_timer.start()
+
+    def advance_recording_countdown(self):
+        self.countdown_remaining -= 1
+        if self.countdown_remaining <= 0:
+            self.record_countdown_timer.stop()
+            self.start_recording_now()
+            return
+        self.status_label.setText(f"{self.countdown_remaining} SN SONRA BAŞLIYOR")
+        self.statusBar().showMessage(
+            f"Kayıt {self.countdown_remaining} saniye içinde başlayacak. İptal etmek için düğmeye bas."
+        )
+
+    def cancel_recording_countdown(self, show_message=True):
+        if not self.record_countdown_timer.isActive():
+            return
+        self.record_countdown_timer.stop()
+        self.countdown_remaining = 0
+        self.record_delay.setEnabled(True)
+        self.btn_record.setText("Kaydı başlat")
+        self.status_label.setText("BAĞLI" if self.capture_thread else "HAZIR")
+        if show_message:
+            self.statusBar().showMessage("Geri sayım iptal edildi", 5000)
+
+    def start_recording_now(self):
+        if not self.capture_thread or not self.capture_thread.isRunning():
+            self.cancel_recording_countdown(show_message=False)
+            self.btn_record.setText("Kaydı başlat")
+            self.record_delay.setEnabled(True)
+            self.status_label.setText("KAMERA BAĞLI DEĞİL")
+            self.statusBar().showMessage("Kayıt için önce kamerayı bağla", 5000)
+            return
+        self.capture_thread.start_recording()
+        self.record_delay.setEnabled(False)
+        self.btn_record.setText("Durdur ve kaydet")
+        self.btn_record.setProperty("recording", True)
+        self.btn_record.style().unpolish(self.btn_record)
+        self.btn_record.style().polish(self.btn_record)
+        self.status_label.setText("KAYIT ALINIYOR")
+        self.statusBar().showMessage("Kayıt başladı")
+
+    def on_confidence_changed(self, value):
+        self.conf_value.setText(f"{value}%")
+        if self.capture_thread:
+            self.capture_thread.min_confidence = value / 100.0
+
+    def run_bake(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "İşlenecek video veya hareket kaydını seç", "data",
+            "MotionForge ve video (*.json *.mp4 *.mov *.avi *.mkv)"
+        )
+        if not path:
+            return
+        self.stop_engine()
+        self.bake_thread = BakeThread(path)
+        self.bake_thread.progress.connect(self.bake_progress.setValue)
+        self.bake_thread.status.connect(self.on_bake_status)
+        self.bake_thread.bake_done.connect(self.on_bake_finished)
+        self.bake_progress.setVisible(True)
+        self.bake_progress.setValue(0)
+        self.bake_thread.start()
+
+    def on_bake_status(self, text):
+        self.statusBar().showMessage(text)
+        if text.startswith("ERROR:"):
+            detail = text.removeprefix("ERROR:").strip()
+            friendly = {
+                "Invalid Input": "Seçilen dosya bulunamadı. Dosya yolunu kontrol edip yeniden seç.",
+                "Could not open video": "Video açılamadı. Dosyanın bozuk olmadığını kontrol et.",
+            }.get(detail, detail)
+            self.statusBar().showMessage(f"İşleme hatası: {friendly}")
+            self.notify_error("İşleme başarısız", friendly)
+
+    def notify_error(self, title, message):
+        """Show actionable errors in a dialog as well as the status bar."""
+        QtWidgets.QMessageBox.warning(self, title, message)
+
+    @staticmethod
+    def camera_error_details(error):
+        message = error.removeprefix("ERROR:").strip()
+        if "no camera found" in message.lower():
+            return (
+                "Web kamerası açılamadı. Bağlantısını kontrol et, kamerayı kullanan diğer "
+                "uygulamaları kapat ve Windows Ayarları'ndan kamera erişimine izin ver."
+            )
+        return message
+
+    def on_bake_finished(self, output_path):
+        self.bake_progress.setVisible(False)
+        self.refresh_library()
+        self.statusBar().showMessage(f"İşlem tamamlandı • {output_path}", 10000)
+        QtWidgets.QMessageBox.information(
+            self, "İşlem tamamlandı", f"İşlenmiş kayıt kaydedildi:\n{output_path}"
+        )
+
+    def refresh_library(self):
+        if not hasattr(self, "library_table"):
+            return
+        os.makedirs("data", exist_ok=True)
+        paths = sorted((os.path.join("data", name) for name in os.listdir("data")
+                        if name.lower().endswith(".json") and not name.endswith(("_unity.json", "_blender.json", "_debug_report.json"))),
+                       key=os.path.getmtime, reverse=True)
+        self.recording_paths = []
+        self.library_table.setRowCount(0)
+        for path in paths:
+            try:
+                frames = UnifiedExporter.load_recording(path)
+                duration = frames[-1].timestamp - frames[0].timestamp if len(frames) > 1 else 0
+                row = self.library_table.rowCount()
+                self.library_table.insertRow(row)
+                self.library_table.setItem(row, 0, QtWidgets.QTableWidgetItem(os.path.basename(path)))
+                self.library_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(len(frames))))
+                self.library_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{duration:.1f} s"))
+                self.recording_paths.append(path)
+            except Exception:
+                continue
+        count = self.library_table.rowCount()
+        self.library_count.setText(f"{count} kayıt")
+        self.library_empty.setVisible(count == 0)
+        self.filter_library()
+
+    def filter_library(self):
+        if not hasattr(self, "library_table"):
+            return
+        query = self.library_search.text().strip().casefold()
+        for row in range(self.library_table.rowCount()):
+            item = self.library_table.item(row, 0)
+            self.library_table.setRowHidden(
+                row, bool(query and query not in item.text().casefold())
+            )
+
+    def select_library_take(self):
+        row = self.library_table.currentRow()
+        if row < 0 or row >= len(self.recording_paths):
+            return
+        path = self.recording_paths[row]
+        try:
+            self.review_frames = UnifiedExporter.load_recording(path)
+            self.review_index = 0
+            self.review_slider.setMaximum(max(0, len(self.review_frames) - 1))
+            self.review_info.setText(f"{os.path.basename(path)} • {len(self.review_frames)} frames")
+            self.render_review_frame()
+            self.export_source.setText(os.path.abspath(path))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Kayıt açılamadı", str(exc))
+
+    def open_json(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open motion recording", "data", "JSON (*.json)")
+        if path:
+            self.load_review_path(path)
+
+    def load_review_path(self, path):
+        for row, candidate in enumerate(self.recording_paths):
+            if os.path.abspath(candidate) == os.path.abspath(path):
+                self.library_table.selectRow(row)
+                return
+        try:
+            self.review_frames = UnifiedExporter.load_recording(path)
+            self.review_index = 0
+            self.review_slider.setMaximum(max(0, len(self.review_frames) - 1))
+            self.review_info.setText(f"{os.path.basename(path)} • {len(self.review_frames)} frames")
+            self.render_review_frame()
+            self.export_source.setText(os.path.abspath(path))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Kayıt açılamadı", str(exc))
+
+    def toggle_review(self):
+        if not self.review_frames:
+            return
+        if self.play_timer.isActive():
+            self.play_timer.stop()
+            self.review_play.setText("Oynat")
+        else:
+            self.play_timer.start()
+            self.review_play.setText("Duraklat")
+
+    def advance_review(self):
+        if not self.review_frames:
+            self.play_timer.stop()
+            return
+        self.review_index = (self.review_index + 1) % len(self.review_frames)
+        self.review_slider.blockSignals(True)
+        self.review_slider.setValue(self.review_index)
+        self.review_slider.blockSignals(False)
+        self.render_review_frame()
+
+    def scrub_review(self, frame_index):
+        if self.review_frames:
+            self.review_index = min(frame_index, len(self.review_frames) - 1)
+            self.render_review_frame()
+
+    def render_review_frame(self):
+        if self.review_frames:
+            self.library_viewport.render_frame(self.review_frames[self.review_index], offset_z=False)
+
+    def choose_export_source(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose recording", "data", "JSON (*.json)")
+        if path:
+            self.export_source.setText(os.path.abspath(path))
+
+    def choose_export_path(self):
+        source = self.export_source.text().strip()
+        base = os.path.splitext(os.path.basename(source))[0] or "MotionForge_export"
+        target = "unity" if self.export_target.currentIndex() == 1 else "blender"
+        current = self.export_path.text().strip()
+        if not current:
+            current = os.path.abspath(os.path.join("data", f"{base}_{target}.json"))
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Choose export file name and location",
+            current,
+            "JSON file (*.json)",
+        )
+        if path:
+            if not path.lower().endswith(".json"):
+                path += ".json"
+            self.export_path.setText(os.path.abspath(path))
+
+    def run_export(self):
+        source = self.export_source.text().strip()
+        output = self.export_path.text().strip()
+        if not source or not os.path.isfile(source):
+            QtWidgets.QMessageBox.warning(self, "Kayıt seç", "Önce geçerli bir MotionForge JSON kaydı seç.")
+            return
+        if not output:
+            self.choose_export_path()
+            output = self.export_path.text().strip()
+        if not output:
+            return
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+            frames = UnifiedExporter.load_recording(source)
+            if frames and frames[0].meta.get("capture_mode") == "face":
+                if self.export_target.currentIndex() == 0:
+                    self.notify_error(
+                        "Yüz ağı dışa aktarımı",
+                        "Yüz kayıtları gövde iskeleti içermez. Bu noktaları dışa aktarmak için "
+                        "Unity nokta animasyonu JSON biçimini seç.",
+                    )
+                    return
+            exporter = BlenderExporter(source)
+            if self.export_target.currentIndex() == 1:
+                exporter.export_unity(output)
+                files = [output]
+            else:
+                stem = os.path.splitext(output)[0]
+                report = f"{stem}_report.json"
+                files = list(exporter.export(output, report))
+            self.export_result.setText("Oluşturulan dosyalar:\n" + "\n".join(files))
+            self.statusBar().showMessage("Dışa aktarım tamamlandı", 8000)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Dışa aktarım başarısız", str(exc))
+
+    def closeEvent(self, event):
+        self.play_timer.stop()
+        self.record_countdown_timer.stop()
+        if self.capture_thread and self.capture_thread.isRunning():
+            self.stop_engine()
+        if self.bake_thread and self.bake_thread.isRunning():
+            self.bake_thread.requestInterruption()
+            self.bake_thread.wait(3000)
+        event.accept()
+
 
 def main():
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
     app = QtWidgets.QApplication(sys.argv)
-    # App-wide scaling fix for high DPI
-    app.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling)
-    
+    app.setFont(QtGui.QFont("Segoe UI Variable", 10))
     window = MotionForgeNexus()
     window.show()
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()
