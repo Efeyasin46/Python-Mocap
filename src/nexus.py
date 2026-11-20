@@ -351,6 +351,7 @@ class MotionForgeNexus(QtWidgets.QMainWindow):
         self.preferences.setValue("view/show_ghost", self.chk_ghost.isChecked())
         self.preferences.setValue("export/default_target", self.default_export_target.currentIndex())
         self.preferences.sync()
+        self.viewport.show_ghost = self.chk_ghost.isChecked()
         self._update_setup_summary()
         self.settings_status.setText("Ayarlar kaydedildi")
 
